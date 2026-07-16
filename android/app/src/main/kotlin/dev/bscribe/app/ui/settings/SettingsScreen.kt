@@ -74,9 +74,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Column(Modifier.padding(start = 8.dp)) {
                         Text(
                             when (candidate) {
-                                LiveTranscriptMode.FULL -> "Full",
-                                LiveTranscriptMode.ECONOMY -> "Economy",
-                                LiveTranscriptMode.OFF -> "Off (capture only)",
+                                LiveTranscriptMode.FULL -> "Full"
+                                LiveTranscriptMode.ECONOMY -> "Economy"
+                                LiveTranscriptMode.OFF -> "Off (capture only)"
                             },
                             style = MaterialTheme.typography.bodyLarge,
                         )
