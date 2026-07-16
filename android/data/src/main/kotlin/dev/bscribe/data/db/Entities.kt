@@ -1,0 +1,123 @@
+package dev.bscribe.data.db
+
+import androidx.room.Entity
+import androidx.room.ForeignKey
+import androidx.room.Index
+import androidx.room.PrimaryKey
+import dev.bscribe.core.model.SessionState
+
+/** One note-taking session: possibly several recordings (pause/resume). */
+@Entity(tableName = "sessions")
+data class SessionEntity(
+    @PrimaryKey val id: String,
+    val title: String?,
+    val createdAt: Long,
+    val state: SessionState,
+    /** "en" | "fa" | "mixed" | null (autodetect). Drives decode + export. */
+    val languageHint: String?,
+    val reviewedAt: Long?,
+)
+
+/**
+ * One contiguous stretch of captured audio — a session gets a new row (and a
+ * new WAV) on every resume. [wavPath] is relative to the app's audio root so
+ * DB backups stay valid across restores.
+ */
+@Entity(
+    tableName = "recordings",
+    foreignKeys = [
+        ForeignKey(
+            entity = SessionEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["sessionId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("sessionId")],
+)
+data class RecordingEntity(
+    @PrimaryKey val id: String,
+    val sessionId: String,
+    /** 0-based position within the session. */
+    val idx: Int,
+    val wavPath: String,
+    val startedWallClock: Long,
+    val durationMs: Long,
+    val sampleRate: Int,
+    /** False while actively being written; false at app start ⇒ crashed. */
+    val finalized: Boolean,
+)
+
+/** A word from the final (accurate) transcription pass. Immutable. */
+@Entity(
+    tableName = "transcript_words",
+    foreignKeys = [
+        ForeignKey(
+            entity = RecordingEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["recordingId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("recordingId")],
+)
+data class TranscriptWordEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val recordingId: String,
+    /** 0-based order within the recording; tap targets key on this. */
+    val wordIdx: Int,
+    val text: String,
+    val t0Ms: Long,
+    val t1Ms: Long,
+    val prob: Float,
+    /** Decoder segment index — groups words into utterances for display/export. */
+    val segmentIdx: Int,
+    /** Which model produced this pass, e.g. "ggml-base-q5_1:sha256:ab12". */
+    val modelId: String,
+)
+
+/**
+ * A user correction over a span of transcript words. Overlay semantics: the
+ * underlying words are never mutated, so corrections double as training pairs
+ * even after a re-transcription replaces the word rows.
+ */
+@Entity(
+    tableName = "corrections",
+    foreignKeys = [
+        ForeignKey(
+            entity = RecordingEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["recordingId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("recordingId")],
+)
+data class CorrectionEntity(
+    @PrimaryKey val id: String,
+    val recordingId: String,
+    val firstWordIdx: Int,
+    val lastWordIdx: Int,
+    /** Audio span of the corrected words at correction time. */
+    val t0Ms: Long,
+    val t1Ms: Long,
+    /** Space-joined original words, frozen when the correction was made. */
+    val originalText: String,
+    /** Empty string ⇒ the words were deleted (misfire, noise). */
+    val correctedText: String,
+    /** True once the word rows it pointed at were replaced by a new pass. */
+    val archived: Boolean,
+    val createdAt: Long,
+    val updatedAt: Long,
+)
+
+/** Log of dataset exports (audit + incremental export later). */
+@Entity(tableName = "export_records")
+data class ExportRecordEntity(
+    @PrimaryKey val id: String,
+    val createdAt: Long,
+    val treeUri: String,
+    val schemaVersion: Int,
+    val sessionCount: Int,
+    val clipCount: Int,
+)

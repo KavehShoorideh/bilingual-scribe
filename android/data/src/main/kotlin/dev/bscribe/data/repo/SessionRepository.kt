@@ -1,0 +1,128 @@
+package dev.bscribe.data.repo
+
+import dev.bscribe.core.audio.WavRepair
+import dev.bscribe.core.audio.WavSpec
+import dev.bscribe.core.model.SessionState
+import dev.bscribe.data.db.RecordingEntity
+import dev.bscribe.data.db.ScribeDatabase
+import dev.bscribe.data.db.SessionEntity
+import dev.bscribe.data.db.SessionWithRecordings
+import java.io.File
+import java.util.UUID
+import kotlinx.coroutines.flow.Flow
+
+/**
+ * Sessions, their audio segments, and crash recovery.
+ *
+ * Audio layout: `<audioRoot>/<sessionId>/seg<idx>.wav`, with only the path
+ * relative to [audioRoot] persisted, so a restored DB + audio folder keeps
+ * working wherever the app data ends up.
+ */
+class SessionRepository(
+    private val db: ScribeDatabase,
+    private val audioRoot: File,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    private val sessions get() = db.sessionDao()
+    private val recordings get() = db.recordingDao()
+
+    fun observeSessions(): Flow<List<SessionWithRecordings>> = sessions.observeAllWithRecordings()
+
+    fun observeSession(id: String): Flow<SessionWithRecordings?> = sessions.observeWithRecordings(id)
+
+    suspend fun session(id: String): SessionEntity? = sessions.byId(id)
+
+    suspend fun recordingsOf(sessionId: String): List<RecordingEntity> =
+        recordings.bySession(sessionId)
+
+    fun resolveWav(recording: RecordingEntity): File = File(audioRoot, recording.wavPath)
+
+    suspend fun createSession(languageHint: String? = "en"): SessionEntity {
+        val session = SessionEntity(
+            id = UUID.randomUUID().toString(),
+            title = null,
+            createdAt = clock(),
+            state = SessionState.RECORDING,
+            languageHint = languageHint,
+            reviewedAt = null,
+        )
+        sessions.insert(session)
+        return session
+    }
+
+    /** Registers the next audio segment and returns it with its WAV resolved. */
+    suspend fun startSegment(sessionId: String, spec: WavSpec = WavSpec.SCRIBE_DEFAULT): Pair<RecordingEntity, File> {
+        val idx = recordings.maxIdx(sessionId) + 1
+        val relPath = "$sessionId/seg%03d.wav".format(idx)
+        val recording = RecordingEntity(
+            id = UUID.randomUUID().toString(),
+            sessionId = sessionId,
+            idx = idx,
+            wavPath = relPath,
+            startedWallClock = clock(),
+            durationMs = 0,
+            sampleRate = spec.sampleRate,
+            finalized = false,
+        )
+        val file = File(audioRoot, relPath)
+        file.parentFile?.mkdirs()
+        recordings.insert(recording)
+        sessions.setState(sessionId, SessionState.RECORDING)
+        return recording to file
+    }
+
+    suspend fun finalizeSegment(recordingId: String, durationMs: Long) {
+        recordings.markFinalized(recordingId, durationMs)
+    }
+
+    suspend fun setState(sessionId: String, state: SessionState) = sessions.setState(sessionId, state)
+
+    suspend fun setTitle(sessionId: String, title: String?) = sessions.setTitle(sessionId, title)
+
+    suspend fun deleteSession(sessionId: String) {
+        // Rows cascade; audio files go with them.
+        sessions.delete(sessionId)
+        File(audioRoot, sessionId).deleteRecursively()
+    }
+
+    /**
+     * Called once at app start, before any UI: repairs WAVs of recordings that
+     * were being written when the process died, then parks their sessions in
+     * STOPPED so their audio is visible and playable. Requirement #1's second
+     * half — losing the process must not lose the idea.
+     */
+    suspend fun recoverInterrupted(): RecoveryReport {
+        var repaired = 0
+        var rejected = 0
+        for (rec in recordings.unfinalized()) {
+            val file = File(audioRoot, rec.wavPath)
+            when (val result = WavRepair.repair(file)) {
+                is WavRepair.Result.Consistent -> {
+                    recordings.markFinalized(rec.id, result.durationMs)
+                    repaired++
+                }
+                is WavRepair.Result.Repaired -> {
+                    recordings.markFinalized(rec.id, result.durationMs)
+                    repaired++
+                }
+                is WavRepair.Result.Rejected -> {
+                    // Nothing usable ever hit the disk (e.g. crash before the
+                    // first buffer). Finalize as empty; keep the row for audit.
+                    recordings.markFinalized(rec.id, 0)
+                    rejected++
+                }
+            }
+        }
+        val stuck = sessions.byStates(listOf(SessionState.RECORDING, SessionState.PAUSED))
+        for (session in stuck) {
+            sessions.setState(session.id, SessionState.STOPPED)
+        }
+        return RecoveryReport(repairedSegments = repaired, emptySegments = rejected, recoveredSessions = stuck.size)
+    }
+
+    data class RecoveryReport(
+        val repairedSegments: Int,
+        val emptySegments: Int,
+        val recoveredSessions: Int,
+    )
+}
