@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Android / Gradle ---
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.kotlin/
+.cxx/
+captures/
+*.apk
+*.aab
+.idea/
+*.iml
+
+# --- Models & datasets — never commit audio or weights ---
+models/*.bin
+models/*.gguf
+trainer/data/
+trainer/runs/
+export-samples/**/*.wav
