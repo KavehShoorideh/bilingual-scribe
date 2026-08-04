@@ -1,11 +1,10 @@
 package dev.bscribe.asr
 
 import dev.bscribe.core.asr.BatchTranscriber
-import dev.bscribe.core.asr.DecodeArbiter
 import dev.bscribe.core.asr.DecodeParams
-import dev.bscribe.core.asr.DecodeResult
-import dev.bscribe.core.asr.Lang
+import dev.bscribe.core.asr.DecodedSegment
 import dev.bscribe.core.asr.ScriptLang
+import dev.bscribe.core.asr.SegmentMerge
 import dev.bscribe.core.asr.Word
 import dev.bscribe.core.audio.PcmConvert
 import android.util.Log
@@ -38,8 +37,9 @@ data class LanguagePlan(val codes: List<String>) {
  * Bilingual strategy: whisper decides a language once per decode and commits
  * to it, so a note that switches languages cannot be handled by a single pass.
  * Instead each window is decoded in *both* languages on separate states that
- * share one set of model weights, and [DecodeArbiter] keeps the more confident
- * result. Per-word language then falls out of the script (see [ScriptLang]).
+ * share one set of model weights, and [SegmentMerge] chooses between them one
+ * utterance at a time. Per-word language then falls out of the script (see
+ * [ScriptLang]).
  *
  * Thread safety: a whisper state is not reentrant, so each has its own mutex.
  * The context is shared read-only across states once loaded.
@@ -149,7 +149,7 @@ class WhisperEngine(
 
             val float = PcmConvert.toFloatMono(chunk)
             val startedAt = System.nanoTime()
-            val winner = decodeWindow(float, params)
+            val merged = decodeWindow(float, params)
             val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
             // Realtime factor per window: the number that says whether live
@@ -162,44 +162,44 @@ class WhisperEngine(
                     "${slots.size} lang x $threadsPerDecode threads)",
             )
 
-            if (winner != null) {
-                val windowLang = if (winner.lang == "fa") Lang.FA else Lang.EN
-                winner.words.forEach { w ->
-                    words += w.copy(
-                        t0Ms = w.t0Ms + startMs,
-                        t1Ms = w.t1Ms + startMs,
-                        // Script is authoritative where it exists; tokens with
-                        // no letters inherit the window's language.
-                        lang = if (w.lang == Lang.UND) windowLang else w.lang,
-                    )
-                }
+            SegmentMerge.words(merged).forEach { w ->
+                words += w.copy(t0Ms = w.t0Ms + startMs, t1Ms = w.t1Ms + startMs)
             }
             startMs = endMs
             onWindow(startMs, durationMs)
         }
 
-        words.mapIndexed { i, w -> w.copy(segmentIdx = i) }
+        // Whisper pads short audio to its 30 s window and often fills the
+        // silence by repeating the last thing it heard.
+        SegmentMerge.collapseRepeats(words).mapIndexed { i, w -> w.copy(segmentIdx = i) }
     }
 
-    /** Decodes one window in every enabled language and returns the winner. */
+    /**
+     * Decodes one window in every enabled language and merges them utterance
+     * by utterance.
+     *
+     * Merging per utterance rather than per window is the whole point: a
+     * sentence that switches language mid-way is a single window, so choosing
+     * one language for the window threw away half the sentence.
+     */
     private suspend fun decodeWindow(
         float: FloatArray,
         params: DecodeParams,
-    ): DecodeResult? = coroutineScope {
+    ): List<DecodedSegment> = coroutineScope {
         if (slots.size == 1) return@coroutineScope runDecode(slots[0], float, params)
 
-        val results = slots.map { slot ->
+        val perLanguage = slots.map { slot ->
             async { runDecode(slot, float, params) }
         }.map { it.await() }
 
-        results.reduce { acc, next -> DecodeArbiter.pick(acc, next) }
+        perLanguage.reduce { acc, next -> SegmentMerge.merge(acc, next) }
     }
 
     private suspend fun runDecode(
         slot: Slot,
         float: FloatArray,
         params: DecodeParams,
-    ): DecodeResult? = slot.mutex.withLock {
+    ): List<DecodedSegment> = slot.mutex.withLock {
         val ok = WhisperNative.nativeFull(
             ctx = ctx,
             state = slot.handle,
@@ -207,29 +207,32 @@ class WhisperEngine(
             language = slot.lang,
             nThreads = threadsPerDecode,
             beamSize = params.beamSize,
-            // 1 word per segment is what gives the UI per-word tap targets.
             maxLen = params.maxLen,
             noContext = params.noContext,
             tokenTimestamps = params.tokenTimestamps,
         )
-        if (!ok) return@withLock null
+        if (!ok) return@withLock emptyList()
 
-        val tokens = mutableListOf<Token>()
+        val segments = mutableListOf<DecodedSegment>()
         val nSeg = WhisperNative.nativeSegmentCount(slot.handle)
         for (seg in 0 until nSeg) {
+            val tokens = mutableListOf<Token>()
             val nTok = WhisperNative.nativeTokenCount(slot.handle, seg)
             for (i in 0 until nTok) {
                 val packed = WhisperNative.nativeTokenAt(ctx, slot.handle, seg, i) ?: continue
                 parseToken(packed)?.let { tokens += it }
             }
+            val words = wordsFromTokens(tokens)
+            if (words.isEmpty()) continue
+            segments += DecodedSegment(
+                lang = slot.lang,
+                t0Ms = words.first().t0Ms,
+                t1Ms = words.last().t1Ms,
+                words = words,
+                avgLogProb = meanLogProb(tokens),
+            )
         }
-        val words = wordsFromTokens(tokens)
-
-        DecodeResult(
-            lang = slot.lang,
-            words = words,
-            avgLogProb = WhisperNative.nativeAvgLogProb(slot.handle),
-        )
+        segments
     }
 
     override fun close() {
@@ -258,6 +261,17 @@ class WhisperEngine(
          */
         val DEFAULT_THREADS: Int =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
+
+        /**
+         * Mean log probability over a segment's tokens — the confidence used
+         * to choose between the English and Farsi reading of the same audio.
+         */
+        internal fun meanLogProb(tokens: List<Token>): Float {
+            if (tokens.isEmpty()) return -1e9f
+            var sum = 0.0
+            for (t in tokens) sum += kotlin.math.ln(t.prob.coerceAtLeast(1e-9f).toDouble())
+            return (sum / tokens.size).toFloat()
+        }
 
         /** Parses "text\tt0\tt1\tprob" from the JNI layer. */
         internal fun parseToken(packed: String): Token? {
