@@ -72,8 +72,13 @@ class TranscriptionRunner(
                     Log.w(TAG, "segment ${recording.id} has no audio file; skipping")
                     return@forEachIndexed
                 }
-                val pcm = WavReader.readRange(wav, 0, recording.durationMs)
-                val words = engine.transcribe(pcm, DecodeParams(nThreads = threads))
+                // Read 30s at a time rather than the whole segment: sessions
+                // can run to hours, and holding one entirely in memory as
+                // PCM16 would OOM before whisper saw any of it.
+                val words = engine.transcribeWindowed(
+                    durationMs = recording.durationMs,
+                    params = DecodeParams(nThreads = threads),
+                ) { startMs, endMs -> WavReader.readRange(wav, startMs, endMs) }
                 repo.saveTranscript(recording.id, words, modelId)
             }
 

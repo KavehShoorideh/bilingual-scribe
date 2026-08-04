@@ -86,38 +86,60 @@ class WhisperEngine(
     private val threadsPerDecode: Int
         get() = (totalThreads / slots.size).coerceAtLeast(1)
 
-    override suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word> =
-        withContext(Dispatchers.Default) {
-            val words = mutableListOf<Word>()
-            var windowStart = 0
-
-            while (windowStart < pcm.size) {
-                val windowLen = minOf(WINDOW_SAMPLES, pcm.size - windowStart)
-                // Windows shorter than a moment are noise, not speech; whisper
-                // hallucinates on them.
-                if (windowLen < MIN_WINDOW_SAMPLES) break
-
-                val float = PcmConvert.toFloatMono(pcm, windowStart, windowLen)
-                val offsetMs = (windowStart * 1000L) / SAMPLE_RATE
-
-                val winner = decodeWindow(float, params)
-                if (winner != null) {
-                    val windowLang = if (winner.lang == "fa") Lang.FA else Lang.EN
-                    winner.words.forEach { w ->
-                        words += w.copy(
-                            t0Ms = w.t0Ms + offsetMs,
-                            t1Ms = w.t1Ms + offsetMs,
-                            // Script is authoritative where it exists; tokens
-                            // with no letters inherit the window's language.
-                            lang = if (w.lang == Lang.UND) windowLang else w.lang,
-                        )
-                    }
-                }
-                windowStart += windowLen
-            }
-
-            words.mapIndexed { i, w -> w.copy(segmentIdx = i) }
+    override suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word> {
+        val durationMs = (pcm.size * 1000L) / SAMPLE_RATE
+        return transcribeWindowed(durationMs, params) { startMs, endMs ->
+            val from = ((startMs * SAMPLE_RATE) / 1000).toInt().coerceIn(0, pcm.size)
+            val to = ((endMs * SAMPLE_RATE) / 1000).toInt().coerceIn(from, pcm.size)
+            pcm.copyOfRange(from, to)
         }
+    }
+
+    /**
+     * Transcribes by pulling one window at a time from [readWindow].
+     *
+     * Recordings are read in 30 s slices rather than all at once: the capture
+     * service allows sessions up to four hours, and a four-hour ShortArray is
+     * roughly 460 MB, which would OOM long before whisper ever saw it.
+     *
+     * @param readWindow returns 16 kHz mono PCM16 for the requested range.
+     */
+    suspend fun transcribeWindowed(
+        durationMs: Long,
+        params: DecodeParams,
+        readWindow: (startMs: Long, endMs: Long) -> ShortArray,
+    ): List<Word> = withContext(Dispatchers.Default) {
+        val words = mutableListOf<Word>()
+        var startMs = 0L
+
+        while (startMs < durationMs) {
+            val endMs = minOf(startMs + WINDOW_MS, durationMs)
+            // Trailing scraps are noise, not speech; whisper hallucinates
+            // rather than reporting silence on them.
+            if (endMs - startMs < MIN_WINDOW_MS) break
+
+            val chunk = readWindow(startMs, endMs)
+            if (chunk.isEmpty()) break
+
+            val float = PcmConvert.toFloatMono(chunk)
+            val winner = decodeWindow(float, params)
+            if (winner != null) {
+                val windowLang = if (winner.lang == "fa") Lang.FA else Lang.EN
+                winner.words.forEach { w ->
+                    words += w.copy(
+                        t0Ms = w.t0Ms + startMs,
+                        t1Ms = w.t1Ms + startMs,
+                        // Script is authoritative where it exists; tokens with
+                        // no letters inherit the window's language.
+                        lang = if (w.lang == Lang.UND) windowLang else w.lang,
+                    )
+                }
+            }
+            startMs = endMs
+        }
+
+        words.mapIndexed { i, w -> w.copy(segmentIdx = i) }
+    }
 
     /** Decodes one window in every enabled language and returns the winner. */
     private suspend fun decodeWindow(
@@ -174,10 +196,10 @@ class WhisperEngine(
         private const val SAMPLE_RATE = 16_000
 
         /** whisper's native context length. */
-        private const val WINDOW_SAMPLES = 30 * SAMPLE_RATE
+        private const val WINDOW_MS = 30_000L
 
         /** Below ~1s whisper invents text rather than admitting silence. */
-        private const val MIN_WINDOW_SAMPLES = SAMPLE_RATE
+        private const val MIN_WINDOW_MS = 1_000L
 
         /**
          * The FP4 has 2 performance + 6 efficiency cores. Asking for all 8
