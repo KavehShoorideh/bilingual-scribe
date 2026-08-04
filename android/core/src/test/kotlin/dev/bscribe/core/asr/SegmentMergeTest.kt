@@ -141,4 +141,69 @@ class SegmentMergeTest {
         assertTrue(SegmentMerge.collapseRepeats(emptyList()).isEmpty())
         assertEquals(1, SegmentMerge.collapseRepeats(listOf(word("hi", 0, 100))).size)
     }
+
+    // ---- suppressing a decisively beaten lane ----
+
+    @Test
+    fun `a decisively beaten reading is dropped`() {
+        // The observed failure: English audio decoded as Farsi came back as a
+        // fluent Persian translation, so the comparison looked like a
+        // translation pair instead of two readings of one sound.
+        val english = listOf(seg("en", 0, 2000, -0.15f, "we're", "gonna", "see", "how"))
+        val farsi = listOf(seg("fa", 0, 2000, -1.10f, "ببینیم", "چه"))
+        assertTrue(SegmentMerge.competitive(farsi, english).isEmpty())
+    }
+
+    @Test
+    fun `the winning reading survives`() {
+        val english = listOf(seg("en", 0, 2000, -0.15f, "hello"))
+        val farsi = listOf(seg("fa", 0, 2000, -1.10f, "سلام"))
+        assertEquals(1, SegmentMerge.competitive(english, farsi).size)
+    }
+
+    @Test
+    fun `a close call stays visible for a human to judge`() {
+        // Near-ties are exactly the ones worth showing: the decoder cannot
+        // settle them, which is the whole reason for asking.
+        val english = listOf(seg("en", 0, 2000, -0.50f, "salaam"))
+        val farsi = listOf(seg("fa", 0, 2000, -0.60f, "سلام"))
+        assertEquals(1, SegmentMerge.competitive(farsi, english).size)
+        assertEquals(1, SegmentMerge.competitive(english, farsi).size)
+    }
+
+    @Test
+    fun `a lane keeps the stretches where the other has nothing`() {
+        // English first, Persian afterwards — a continuation, not a
+        // translation. The Persian must survive in its own stretch even though
+        // it was beaten during the English one.
+        val english = listOf(
+            seg("en", 0, 3000, -0.15f, "this", "part", "is", "english"),
+            seg("en", 4000, 7000, -1.40f, "gibberish", "here"),
+        )
+        val farsi = listOf(
+            seg("fa", 0, 3000, -1.30f, "ترجمه"),
+            seg("fa", 4000, 7000, -0.20f, "این", "قسمت", "فارسیه"),
+        )
+
+        val keptFarsi = SegmentMerge.competitive(farsi, english)
+        assertEquals(1, keptFarsi.size)
+        assertEquals(4000L, keptFarsi[0].t0Ms, "the real Persian must stay at its own time")
+
+        val keptEnglish = SegmentMerge.competitive(english, farsi)
+        assertEquals(1, keptEnglish.size)
+        assertEquals(0L, keptEnglish[0].t0Ms)
+    }
+
+    @Test
+    fun `non-overlapping segments never suppress each other`() {
+        val english = listOf(seg("en", 0, 1000, -0.10f, "early"))
+        val farsi = listOf(seg("fa", 5000, 6000, -1.50f, "دیر"))
+        assertEquals(1, SegmentMerge.competitive(farsi, english).size)
+    }
+
+    @Test
+    fun `with no rival everything is kept`() {
+        val english = listOf(seg("en", 0, 1000, -2.0f, "anything"))
+        assertEquals(1, SegmentMerge.competitive(english, emptyList()).size)
+    }
 }

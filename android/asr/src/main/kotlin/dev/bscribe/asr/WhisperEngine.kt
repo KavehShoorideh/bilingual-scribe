@@ -177,7 +177,13 @@ class WhisperEngine(
                 words += w.copy(t0Ms = w.t0Ms + startMs, t1Ms = w.t1Ms + startMs)
             }
             for ((lang, segments) in decoded) {
-                SegmentMerge.words(segments).forEach { w ->
+                // Only what this language plausibly contributes. A language
+                // decisively beaten over a stretch of audio was translating
+                // rather than transcribing, and showing that alongside the
+                // winner reads as a translation pair rather than two readings
+                // of the same sound.
+                val rivals = decoded.filterKeys { it != lang }.values.flatten()
+                SegmentMerge.words(SegmentMerge.competitive(segments, rivals)).forEach { w ->
                     perLanguage[lang]?.add(
                         w.copy(t0Ms = w.t0Ms + startMs, t1Ms = w.t1Ms + startMs),
                     )

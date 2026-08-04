@@ -67,6 +67,36 @@ object SegmentMerge {
     }
 
     /**
+     * Drops segments the other language decisively beat.
+     *
+     * Whisper forced to a language the speaker is not using does not produce
+     * noise — it produces a *translation*. English audio decoded as Farsi
+     * comes back as fluent Persian saying the same thing, which made the
+     * comparison view look as though the two lanes were a translation pair
+     * rather than two readings of the same sound.
+     *
+     * Where one language clearly won, the other has nothing to contribute, so
+     * its lane is left empty for that stretch. A lane showing nothing is
+     * information: it says this passage was not that language.
+     *
+     * The margin keeps genuinely close calls visible, which are exactly the
+     * ones worth a human verdict.
+     */
+    fun competitive(
+        own: List<DecodedSegment>,
+        other: List<DecodedSegment>,
+        marginLogProb: Float = DECISIVE_MARGIN,
+    ): List<DecodedSegment> = own.filter { segment ->
+        val beaten = other.any { rival ->
+            rival.overlaps(segment) && rival.avgLogProb - segment.avgLogProb > marginLogProb
+        }
+        !beaten
+    }
+
+    private fun DecodedSegment.overlaps(other: DecodedSegment): Boolean =
+        t0Ms < other.t1Ms && t1Ms > other.t0Ms
+
+    /**
      * Flattens merged segments to words, tagging any word whose script is
      * ambiguous with the language its segment was decoded in.
      */
@@ -115,4 +145,12 @@ object SegmentMerge {
 
     /** Shorter repeats are more likely to be genuine speech than hallucination. */
     const val MIN_REPEAT_WORDS = 2
+
+    /**
+     * How much better one language's reading must be before the other is
+     * treated as having nothing to say. In nats of mean per-token log
+     * probability, where a confident decode sits near -0.2 and a poor one
+     * below -1.0.
+     */
+    const val DECISIVE_MARGIN = 0.45f
 }
