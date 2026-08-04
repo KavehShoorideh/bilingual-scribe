@@ -29,6 +29,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,10 +37,12 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.bscribe.app.util.formatClock
+import dev.bscribe.core.asr.TimelineLayout
 import kotlin.math.roundToInt
 
 /**
@@ -159,7 +162,26 @@ private fun Lane(
     onTap: (TimelineWord) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val measurer = rememberTextMeasurer()
+    val style = MaterialTheme.typography.bodyLarge
     val density = LocalDensity.current
+    val chipPaddingPx = with(density) { 12.dp.toPx() }
+
+    // Words are placed by measured width as well as time, because speech runs
+    // faster than text can be read: four words a second occupy a few pixels of
+    // timeline but need far more to be legible, so placing by time alone piled
+    // them on top of each other exactly where there was most to read.
+    val items = remember(words, style) {
+        words.map { w ->
+            val width = measurer.measure(w.text, style).size.width + chipPaddingPx
+            TimelineLayout.Item(w.t0Ms, w.t1Ms, width)
+        }
+    }
+    val placed = remember(items) { TimelineLayout.place(items, PX_PER_MS) }
+    val playhead = TimelineLayout.playheadX(items, placed, nowMs, PX_PER_MS)
+
+    val halfWidthPx = with(density) { LANE_HALF_WIDTH_DP.dp.toPx() }
+
     Box(modifier.fillMaxWidth().height(120.dp)) {
         Text(
             label,
@@ -168,44 +190,48 @@ private fun Lane(
             modifier = Modifier.align(Alignment.TopStart).padding(start = 8.dp),
         )
 
-        val halfWidthPx = with(density) { LANE_HALF_WIDTH_DP.dp.toPx() }
-        val visibleMs = (halfWidthPx / PX_PER_MS).toLong()
+        placed.forEachIndexed { i, p ->
+            val relative = p.xPx - playhead
+            // Skip anything off-screen: a long recording has thousands of
+            // words and composing them all would cost far more than it shows.
+            if (relative + p.widthPx < -halfWidthPx || relative > halfWidthPx) return@forEachIndexed
 
-        words.asSequence()
-            .filter { it.t1Ms >= nowMs - visibleMs && it.t0Ms <= nowMs + visibleMs }
-            .forEach { word ->
-                val deltaMs = word.t0Ms - nowMs
-                // Mirroring is what lets Farsi read right-to-left while still
-                // lining up in time with the English above it.
-                val dx = deltaMs * PX_PER_MS * if (mirrored) -1f else 1f
-                Box(
-                    Modifier
-                        .align(Alignment.Center)
-                        .offset { IntOffset(dx.roundToInt(), 0) }
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(
-                            if (word.chosen) {
-                                MaterialTheme.colorScheme.secondaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            },
-                        )
-                        .clickable { onTap(word) }
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                ) {
-                    Text(
-                        word.text,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = if (word.chosen) FontWeight.Medium else FontWeight.Normal,
-                        color = MaterialTheme.colorScheme.onSurface.copy(
-                            alpha = if (word.chosen) 1f else 0.6f,
-                        ),
+            val word = words[i]
+            // Mirroring is what lets Farsi read right-to-left while still
+            // lining up in time with the English above it. The width is
+            // subtracted so the word's trailing edge, not its leading one,
+            // meets the playhead.
+            val dx = if (mirrored) -(relative + p.widthPx) else relative
+
+            Box(
+                Modifier
+                    .align(Alignment.Center)
+                    .offset { IntOffset(dx.roundToInt(), 0) }
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        if (word.chosen) {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
                     )
-                }
+                    .clickable { onTap(word) }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    word.text,
+                    style = style,
+                    maxLines = 1,
+                    fontWeight = if (word.chosen) FontWeight.Medium else FontWeight.Normal,
+                    color = MaterialTheme.colorScheme.onSurface.copy(
+                        alpha = if (word.chosen) 1f else 0.6f,
+                    ),
+                )
             }
+        }
     }
 }
 
 /** Horizontal pixels per millisecond of audio. 60 px per second reads well. */
-private const val PX_PER_MS = 0.06f
+private const val PX_PER_MS = 0.09f
 private const val LANE_HALF_WIDTH_DP = 400
