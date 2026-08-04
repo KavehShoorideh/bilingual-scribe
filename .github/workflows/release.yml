@@ -58,7 +58,12 @@ jobs:
         working-directory: android
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs "$APK"
+          # Runners ship several build-tools versions, so an unquoted glob
+          # expands to multiple paths and the extras get eaten as apksigner
+          # subcommands. Pick the newest one explicitly.
+          APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          echo "using $APKSIGNER"
+          "$APKSIGNER" verify --print-certs "$APK"
 
       - name: Keep the runner free of key material
         if: always()
