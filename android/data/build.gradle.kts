@@ -22,6 +22,12 @@ android {
             isIncludeAndroidResources = true
         }
     }
+
+    // MigrationTestHelper loads the exported schema JSON from assets at
+    // runtime; without this it fails with FileNotFoundException.
+    sourceSets {
+        getByName("test") { assets.srcDirs("$projectDir/schemas") }
+    }
 }
 
 kotlin {

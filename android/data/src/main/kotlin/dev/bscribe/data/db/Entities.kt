@@ -74,6 +74,18 @@ data class TranscriptWordEntity(
     val segmentIdx: Int,
     /** Which model produced this pass, e.g. "ggml-base-q5_1:sha256:ab12". */
     val modelId: String,
+    /**
+     * "en" | "fa" | "und", from the word's Unicode script. Feeds the
+     * `language_hint` field of the export bundle.
+     */
+    val lang: String = "und",
+    /**
+     * Mean log probability of the decode this word came from. Kept so a
+     * questionable transcript can be checked against the arbitration decision
+     * that produced it — with dual-language decoding, "why did it pick Farsi
+     * here?" is otherwise unanswerable after the fact.
+     */
+    val avgLogProb: Float = 0f,
 )
 
 /**

@@ -6,6 +6,8 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import dev.bscribe.core.model.SessionState
 
 class Converters {
@@ -24,7 +26,7 @@ class Converters {
         CorrectionEntity::class,
         ExportRecordEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -36,8 +38,31 @@ abstract class ScribeDatabase : RoomDatabase() {
     abstract fun exportDao(): ExportDao
 
     companion object {
+        /**
+         * v1 → v2: per-word language and the decode confidence that produced
+         * it, both added by M1a's bilingual final pass.
+         *
+         * Written as a real migration rather than a destructive fallback
+         * because by the time this shipped there were already recordings on
+         * the phone, and losing them would violate the one guarantee this app
+         * makes.
+         */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE transcript_words " +
+                        "ADD COLUMN lang TEXT NOT NULL DEFAULT 'und'",
+                )
+                db.execSQL(
+                    "ALTER TABLE transcript_words " +
+                        "ADD COLUMN avgLogProb REAL NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
         fun build(context: Context): ScribeDatabase =
             Room.databaseBuilder(context, ScribeDatabase::class.java, "scribe.db")
+                .addMigrations(MIGRATION_1_2)
                 .build()
     }
 }
