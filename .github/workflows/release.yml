@@ -69,7 +69,42 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/bscribe-release.jks"
 
+      # The GitHub API exposes a tag name, not a versionCode, so the in-app
+      # updater cannot tell whether a release is newer without this. Read the
+      # versionCode back out of the APK rather than recomputing it, so the
+      # manifest and the metadata can never disagree.
+      - name: Generate update.json for the in-app updater
+        working-directory: android
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          BADGING=$("$BT/aapt2" dump badging "$APK")
+          VERSION_CODE=$(sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" <<<"$BADGING" | head -1)
+          VERSION_NAME=$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<<"$BADGING" | head -1)
+          SHA256=$(sha256sum "$APK" | cut -d' ' -f1)
+          TAG="${GITHUB_REF_NAME}"
+          APK_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/app-release.apk"
+
+          if [ -z "$VERSION_CODE" ]; then
+            echo "::error::could not read versionCode from the APK"
+            exit 1
+          fi
+
+          cat > update.json <<EOF
+          {
+            "versionCode": ${VERSION_CODE},
+            "versionName": "${VERSION_NAME}",
+            "tag": "${TAG}",
+            "apkUrl": "${APK_URL}",
+            "sha256": "${SHA256}"
+          }
+          EOF
+          cat update.json
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: android/app/build/outputs/apk/release/app-release.apk
+          files: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/update.json
           generate_release_notes: true

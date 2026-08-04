@@ -5,6 +5,7 @@ import dev.bscribe.app.record.RecorderStateHolder
 import dev.bscribe.data.db.ScribeDatabase
 import dev.bscribe.data.repo.SessionRepository
 import dev.bscribe.data.repo.SettingsRepository
+import dev.bscribe.data.repo.UpdateRepository
 import java.io.File
 
 /**
@@ -23,6 +24,13 @@ class AppContainer(context: Context) {
 
     val settingsRepository: SettingsRepository by lazy {
         SettingsRepository(context)
+    }
+
+    val updateRepository: UpdateRepository by lazy {
+        UpdateRepository(
+            cacheDir = context.cacheDir,
+            currentVersionCode = BuildConfig.VERSION_CODE,
+        )
     }
 
     /** Single source of truth the record screen and the service both observe. */

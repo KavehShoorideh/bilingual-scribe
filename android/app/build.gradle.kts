@@ -71,6 +71,9 @@ android {
 
     buildFeatures {
         compose = true
+        // The updater compares BuildConfig.VERSION_CODE against the published
+        // release metadata.
+        buildConfig = true
     }
 }
 
