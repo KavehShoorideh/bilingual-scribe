@@ -63,6 +63,17 @@ object SpeakerChange {
         frameOf: (Long) -> Int,
         contextFrames: Int = CONTEXT_FRAMES,
         threshold: Double = THRESHOLD,
+        /**
+         * Language of each word, if known.
+         *
+         * One person switching between English and Persian changes their
+         * phonemes and prosody enough to look like a different speaker, so a
+         * boundary that is also a language change is attributed to the
+         * language rather than reported as a new voice. Bilingual speech is
+         * the normal case for this app, so without this nearly every
+         * code-switch produced a spurious "new voice".
+         */
+        languageOf: ((Int) -> Lang)? = null,
     ): IntArray {
         val turns = IntArray(wordCount)
         if (wordCount == 0 || frames.isEmpty()) return turns
@@ -70,6 +81,9 @@ object SpeakerChange {
         // Which words begin a new turn.
         val changesAt = HashSet<Int>()
         for (candidate in candidates) {
+            if (languageOf != null && crossesLanguage(candidate.wordIndex, wordCount, languageOf)) {
+                continue
+            }
             val at = frameOf(candidate.timeMs)
             val before = meanOf(frames, at - contextFrames, at)
             val after = meanOf(frames, at, at + contextFrames)
@@ -85,6 +99,35 @@ object SpeakerChange {
             turns[i] = turn
         }
         return turns
+    }
+
+    /**
+     * Whether the words either side of a boundary are in different languages.
+     *
+     * Script-neutral words are skipped over rather than treated as a language
+     * of their own, so a number sitting on the boundary doesn't hide a genuine
+     * change or invent one.
+     */
+    private fun crossesLanguage(
+        boundary: Int,
+        wordCount: Int,
+        languageOf: (Int) -> Lang,
+    ): Boolean {
+        var before: Lang? = null
+        var i = boundary - 1
+        while (i >= 0) {
+            val l = languageOf(i)
+            if (l != Lang.UND) { before = l; break }
+            i--
+        }
+        var after: Lang? = null
+        var j = boundary
+        while (j < wordCount) {
+            val l = languageOf(j)
+            if (l != Lang.UND) { after = l; break }
+            j++
+        }
+        return before != null && after != null && before != after
     }
 
     /** Mean vector over a half-open frame range, or null if too short. */

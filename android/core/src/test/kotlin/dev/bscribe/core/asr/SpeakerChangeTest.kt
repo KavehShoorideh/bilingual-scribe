@@ -117,6 +117,60 @@ class SpeakerChangeTest {
         assertEquals(listOf(0, 0, 1, 1, 2, 2), turns.toList())
     }
 
+    @Test
+    fun `a language switch by one person is not a new voice`() {
+        // The exact false positive seen in the field: one speaker going from
+        // English to Persian mid-note was reported as a second person.
+        val frames = List(200) { i ->
+            if (i < 100) doubleArrayOf(1.0, 0.0, 0.0) else doubleArrayOf(0.0, 1.0, 0.0)
+        }
+        val langs = listOf(Lang.EN, Lang.EN, Lang.FA, Lang.FA)
+        val turns = SpeakerChange.assignTurns(
+            wordCount = 4,
+            candidates = listOf(SpeakerChange.Candidate(2, 1000)),
+            frames = frames,
+            frameOf = { 100 },
+            contextFrames = 100,
+            languageOf = { langs[it] },
+        )
+        assertTrue(turns.all { it == 0 }, "a code-switch must not read as a new speaker")
+    }
+
+    @Test
+    fun `a different voice in the same language still splits`() {
+        val frames = List(200) { i ->
+            if (i < 100) doubleArrayOf(1.0, 0.0, 0.0) else doubleArrayOf(0.0, 1.0, 0.0)
+        }
+        val langs = listOf(Lang.EN, Lang.EN, Lang.EN, Lang.EN)
+        val turns = SpeakerChange.assignTurns(
+            wordCount = 4,
+            candidates = listOf(SpeakerChange.Candidate(2, 1000)),
+            frames = frames,
+            frameOf = { 100 },
+            contextFrames = 100,
+            languageOf = { langs[it] },
+        )
+        assertEquals(listOf(0, 0, 1, 1), turns.toList())
+    }
+
+    @Test
+    fun `numbers on the boundary do not mask a language change`() {
+        val frames = List(200) { i ->
+            if (i < 100) doubleArrayOf(1.0, 0.0) else doubleArrayOf(0.0, 1.0)
+        }
+        // EN, UND (a number), FA — still a code-switch, not a new speaker.
+        val langs = listOf(Lang.EN, Lang.UND, Lang.FA, Lang.FA)
+        val turns = SpeakerChange.assignTurns(
+            wordCount = 4,
+            candidates = listOf(SpeakerChange.Candidate(2, 1000)),
+            frames = frames,
+            frameOf = { 100 },
+            contextFrames = 100,
+            languageOf = { langs[it] },
+        )
+        assertTrue(turns.all { it == 0 })
+    }
+
     // ---- distance ----
 
     @Test

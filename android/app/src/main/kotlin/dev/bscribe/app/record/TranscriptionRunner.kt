@@ -190,6 +190,10 @@ class TranscriptionRunner(
                 candidates = SpeakerChange.candidates(times),
                 frames = frames,
                 frameOf = mfcc::frameAt,
+                // One person switching language shifts their phonemes and
+                // prosody enough to read as a different speaker; without this
+                // every code-switch produced a spurious "new voice".
+                languageOf = { i -> words[i].lang },
             )
         } catch (e: Exception) {
             Log.w(TAG, "speaker-change detection failed; transcript keeps one turn", e)
