@@ -146,6 +146,96 @@ class ModelRepository(private val filesDir: File) {
         }
     }
 
+    /**
+     * Installs a model the user obtained elsewhere — a browser download, a
+     * file transfer, or a personal fine-tune from the trainer.
+     *
+     * This is the escape hatch when the app itself cannot reach the network,
+     * and on a privacy-first app it is arguably the more natural path anyway:
+     * the phone never has to talk to HuggingFace at all.
+     *
+     * @param open supplies the bytes; the caller owns the URI and its lifetime.
+     */
+    suspend fun importFrom(
+        spec: ModelSpec,
+        open: () -> java.io.InputStream?,
+    ): Unit = withContext(Dispatchers.IO) {
+        val part = partFor(spec)
+        val target = fileFor(spec)
+        try {
+            setStatus(spec, ModelStatus.Downloading(0))
+            part.delete()
+
+            val input = open()
+            if (input == null) {
+                setStatus(spec, ModelStatus.Failed("Could not read that file."))
+                return@withContext
+            }
+
+            input.use { source ->
+                part.outputStream().use { output ->
+                    val buf = ByteArray(1 shl 16)
+                    var written = 0L
+                    var lastPct = -1
+                    while (true) {
+                        if (!currentCoroutineContext().isActive) throw CancellationException()
+                        val n = source.read(buf)
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                        written += n
+                        // Size is known from the catalog, so progress is real
+                        // even though the source stream may not report length.
+                        val pct = percentOf(written, spec.sizeBytes)
+                        if (pct != lastPct) {
+                            lastPct = pct
+                            setStatus(spec, ModelStatus.Downloading(pct))
+                        }
+                    }
+                }
+            }
+
+            if (part.length() != spec.sizeBytes) {
+                val got = part.length()
+                part.delete()
+                setStatus(
+                    spec,
+                    ModelStatus.Failed(
+                        "That file is ${got / 1_000_000} MB but ${spec.label} should be " +
+                            "${spec.sizeMb} MB. Wrong file, or the download was incomplete.",
+                    ),
+                )
+                return@withContext
+            }
+
+            val actual = sha256(part)
+            if (!actual.equals(spec.sha256, ignoreCase = true)) {
+                part.delete()
+                setStatus(
+                    spec,
+                    ModelStatus.Failed(
+                        "That file is the right size but its contents don't match " +
+                            "${spec.label}. Not installing it.",
+                    ),
+                )
+                return@withContext
+            }
+
+            if (!part.renameTo(target)) {
+                part.delete()
+                setStatus(spec, ModelStatus.Failed("Could not move the model into place."))
+                return@withContext
+            }
+            setStatus(spec, ModelStatus.Installed(target))
+        } catch (e: CancellationException) {
+            part.delete()
+            setStatus(spec, ModelStatus.Absent)
+            throw e
+        } catch (e: Exception) {
+            part.delete()
+            setStatus(spec, ModelStatus.Failed(e.message ?: e.javaClass.simpleName))
+        }
+    }
+
     private fun partFor(spec: ModelSpec) = File(modelsDir(), spec.fileName + ".part")
 
     private fun setStatus(spec: ModelSpec, status: ModelStatus) {

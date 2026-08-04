@@ -1,6 +1,12 @@
 package dev.bscribe.app.ui.models
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ContentResolver
 import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -71,6 +77,14 @@ class ModelsViewModel(
         jobs[spec.fileName] = viewModelScope.launch { models.download(spec) }
     }
 
+    /** Installs a model file the user picked from storage. */
+    fun import(spec: ModelSpec, uri: Uri, resolver: ContentResolver) {
+        if (jobs[spec.fileName]?.isActive == true) return
+        jobs[spec.fileName] = viewModelScope.launch {
+            models.importFrom(spec) { resolver.openInputStream(uri) }
+        }
+    }
+
     fun cancel(spec: ModelSpec) {
         jobs.remove(spec.fileName)?.cancel()
     }
@@ -122,9 +136,17 @@ fun ModelsScreen(onBack: () -> Unit) {
         ) {
             Text(
                 "Models run entirely on this phone. Nothing you say is uploaded — " +
-                    "downloading the weights is the only time the app uses the network.",
+                    "fetching the weights is the only time the app uses the network.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "If Download fails, the app has no network access. Tap Copy link, " +
+                    "download the file in your browser, then tap Import file. " +
+                    "Imports are checked against the same checksum.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
             )
 
             ModelCatalog.all.forEach { spec ->
@@ -136,6 +158,11 @@ fun ModelsScreen(onBack: () -> Unit) {
                     onCancel = { vm.cancel(spec) },
                     onDelete = { vm.delete(spec) },
                     onSelect = { vm.selectForFinalPass(spec) },
+                    onImport = { uri -> vm.import(spec, uri, context.contentResolver) },
+                    onCopyUrl = {
+                        val cm = context.getSystemService(ClipboardManager::class.java)
+                        cm.setPrimaryClip(ClipData.newPlainText(spec.fileName, spec.url))
+                    },
                 )
             }
         }
@@ -151,7 +178,15 @@ private fun ModelRow(
     onCancel: () -> Unit,
     onDelete: () -> Unit,
     onSelect: () -> Unit,
+    onImport: (Uri) -> Unit,
+    onCopyUrl: () -> Unit,
 ) {
+    // "*/*" rather than a MIME type: .bin has no registered type and most
+    // file pickers hide it under anything narrower.
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) onImport(uri) }
+
     Card(Modifier.fillMaxWidth().padding(top = 12.dp)) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -169,10 +204,16 @@ private fun ModelRow(
             }
 
             when (status) {
-                is ModelStatus.Absent ->
-                    Button(onClick = onDownload, modifier = Modifier.padding(top = 8.dp)) {
-                        Text("Download")
+                is ModelStatus.Absent -> Row(
+                    Modifier.padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Button(onClick = onDownload) { Text("Download") }
+                    TextButton(onClick = { picker.launch(arrayOf("*/*")) }) {
+                        Text("Import file")
                     }
+                    TextButton(onClick = onCopyUrl) { Text("Copy link") }
+                }
 
                 is ModelStatus.Downloading -> {
                     LinearProgressIndicator(
@@ -205,7 +246,13 @@ private fun ModelRow(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
-                    Button(onClick = onDownload) { Text("Try again") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Button(onClick = onDownload) { Text("Try again") }
+                        TextButton(onClick = { picker.launch(arrayOf("*/*")) }) {
+                            Text("Import file")
+                        }
+                        TextButton(onClick = onCopyUrl) { Text("Copy link") }
+                    }
                 }
             }
         }
