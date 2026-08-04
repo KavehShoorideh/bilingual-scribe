@@ -20,6 +20,24 @@ val gitCommitCount: Int by lazy {
 }
 
 /**
+ * versionName comes from the most recent tag, for the same reason versionCode
+ * comes from the commit count: a hand-maintained constant drifts. It already
+ * did once — v0.2.0-m0.6 shipped announcing itself as "0.1.0-m0", which the
+ * in-app updater would have shown as an upgrade to the version you were
+ * already running.
+ *
+ * Falls back to a dev marker outside a git checkout or before the first tag.
+ */
+val gitVersionName: String by lazy {
+    runCatching {
+        providers.exec {
+            commandLine("git", "describe", "--tags", "--abbrev=0")
+        }.standardOutput.asText.get().trim().removePrefix("v")
+            .ifEmpty { throw IllegalStateException("no tag") }
+    }.getOrDefault("0.0.0-dev")
+}
+
+/**
  * Release signing. Credentials come from the environment (CI) or
  * ~/.gradle/gradle.properties (local) and are never committed. When they are
  * absent the release build stays unsigned rather than silently falling back to
@@ -38,7 +56,7 @@ android {
         minSdk = 33
         targetSdk = 35
         versionCode = gitCommitCount
-        versionName = "0.1.0-m0"
+        versionName = gitVersionName
     }
 
     signingConfigs {
