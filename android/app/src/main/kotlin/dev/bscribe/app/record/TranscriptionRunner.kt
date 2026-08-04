@@ -106,7 +106,7 @@ class TranscriptionRunner(
                 // Read 30s at a time rather than the whole segment: sessions
                 // can run to hours, and holding one entirely in memory as
                 // PCM16 would OOM before whisper saw any of it.
-                val words = engine.transcribeWindowed(
+                val pass = engine.transcribeWindowed(
                     durationMs = recording.durationMs,
                     params = DecodeParams(nThreads = threads),
                     onWindow = { doneMs, _ ->
@@ -115,7 +115,12 @@ class TranscriptionRunner(
                 ) { startMs, endMs -> WavReader.readRange(wav, startMs, endMs) }
                 // Saved per segment, so cancelling or crashing mid-session
                 // keeps whatever was already transcribed.
-                repo.saveTranscript(recording.id, words, modelId, speakerTurns(wav, words))
+                repo.saveTranscript(
+                    recording.id,
+                    pass,
+                    modelId,
+                    speakerTurns(wav, pass.chosen),
+                )
                 completedMs += recording.durationMs
             }
             val wallMs = System.currentTimeMillis() - startedAt

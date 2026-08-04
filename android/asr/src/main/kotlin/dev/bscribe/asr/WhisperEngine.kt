@@ -5,6 +5,7 @@ import dev.bscribe.core.asr.DecodeParams
 import dev.bscribe.core.asr.DecodedSegment
 import dev.bscribe.core.asr.ScriptLang
 import dev.bscribe.core.asr.SegmentMerge
+import dev.bscribe.core.asr.TranscriptPass
 import dev.bscribe.core.asr.Word
 import dev.bscribe.core.audio.PcmConvert
 import android.util.Log
@@ -107,7 +108,10 @@ class WhisperEngine(
         // 4+4 and actually uses the whole chip.
         get() = (totalThreads / slots.size).coerceIn(1, MAX_THREADS_PER_DECODE)
 
-    override suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word> {
+    override suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word> =
+        transcribePass(pcm, params).chosen
+
+    suspend fun transcribePass(pcm: ShortArray, params: DecodeParams): TranscriptPass {
         val durationMs = (pcm.size * 1000L) / SAMPLE_RATE
         return transcribeWindowed(durationMs, params) { startMs, endMs ->
             val from = ((startMs * SAMPLE_RATE) / 1000).toInt().coerceIn(0, pcm.size)
@@ -130,8 +134,11 @@ class WhisperEngine(
         params: DecodeParams,
         onWindow: (doneMs: Long, totalMs: Long) -> Unit = { _, _ -> },
         readWindow: (startMs: Long, endMs: Long) -> ShortArray,
-    ): List<Word> = withContext(Dispatchers.Default) {
+    ): TranscriptPass = withContext(Dispatchers.Default) {
         val words = mutableListOf<Word>()
+        // Every language's own reading, kept so the UI can show both and the
+        // user can say which was right.
+        val perLanguage = slots.associate { it.lang to mutableListOf<Word>() }
         var startMs = 0L
 
         while (startMs < durationMs) {
@@ -149,7 +156,11 @@ class WhisperEngine(
 
             val float = PcmConvert.toFloatMono(chunk)
             val startedAt = System.nanoTime()
-            val merged = decodeWindow(float, params)
+            val decoded = decodeWindow(float, params)
+            val merged = SegmentMerge.merge(
+                decoded[slots[0].lang].orEmpty(),
+                decoded.getOrElse(slots.getOrNull(1)?.lang ?: "") { emptyList() },
+            )
             val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
             // Realtime factor per window: the number that says whether live
@@ -165,13 +176,26 @@ class WhisperEngine(
             SegmentMerge.words(merged).forEach { w ->
                 words += w.copy(t0Ms = w.t0Ms + startMs, t1Ms = w.t1Ms + startMs)
             }
+            for ((lang, segments) in decoded) {
+                SegmentMerge.words(segments).forEach { w ->
+                    perLanguage[lang]?.add(
+                        w.copy(t0Ms = w.t0Ms + startMs, t1Ms = w.t1Ms + startMs),
+                    )
+                }
+            }
             startMs = endMs
             onWindow(startMs, durationMs)
         }
 
         // Whisper pads short audio to its 30 s window and often fills the
         // silence by repeating the last thing it heard.
-        SegmentMerge.collapseRepeats(words).mapIndexed { i, w -> w.copy(segmentIdx = i) }
+        fun tidy(list: List<Word>) =
+            SegmentMerge.collapseRepeats(list).mapIndexed { i, w -> w.copy(segmentIdx = i) }
+
+        TranscriptPass(
+            chosen = tidy(words),
+            alternatives = perLanguage.mapValues { (_, v) -> tidy(v) },
+        )
     }
 
     /**
@@ -185,14 +209,9 @@ class WhisperEngine(
     private suspend fun decodeWindow(
         float: FloatArray,
         params: DecodeParams,
-    ): List<DecodedSegment> = coroutineScope {
-        if (slots.size == 1) return@coroutineScope runDecode(slots[0], float, params)
-
-        val perLanguage = slots.map { slot ->
-            async { runDecode(slot, float, params) }
-        }.map { it.await() }
-
-        perLanguage.reduce { acc, next -> SegmentMerge.merge(acc, next) }
+    ): Map<String, List<DecodedSegment>> = coroutineScope {
+        val jobs = slots.map { slot -> slot.lang to async { runDecode(slot, float, params) } }
+        jobs.associate { (lang, job) -> lang to job.await() }
     }
 
     private suspend fun runDecode(

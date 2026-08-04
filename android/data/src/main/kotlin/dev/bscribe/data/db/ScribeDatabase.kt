@@ -25,8 +25,9 @@ class Converters {
         TranscriptWordEntity::class,
         CorrectionEntity::class,
         ExportRecordEntity::class,
+        LanguageFeedbackEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -36,6 +37,7 @@ abstract class ScribeDatabase : RoomDatabase() {
     abstract fun transcriptDao(): TranscriptDao
     abstract fun correctionDao(): CorrectionDao
     abstract fun exportDao(): ExportDao
+    abstract fun feedbackDao(): LanguageFeedbackDao
 
     companion object {
         /**
@@ -89,9 +91,45 @@ abstract class ScribeDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v5 → v6: keep every language's reading, plus the user's verdict on
+         * which was right.
+         *
+         * Existing words were the chosen reading by definition, so they
+         * default to chosen with an unknown variant.
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE transcript_words ADD COLUMN variant TEXT NOT NULL DEFAULT ''",
+                )
+                db.execSQL(
+                    "ALTER TABLE transcript_words ADD COLUMN chosen INTEGER NOT NULL DEFAULT 1",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS language_feedback (" +
+                        "id TEXT NOT NULL PRIMARY KEY, " +
+                        "recordingId TEXT NOT NULL, " +
+                        "t0Ms INTEGER NOT NULL, " +
+                        "t1Ms INTEGER NOT NULL, " +
+                        "chosenLang TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "FOREIGN KEY(recordingId) REFERENCES recordings(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_language_feedback_recordingId " +
+                        "ON language_feedback (recordingId)",
+                )
+            }
+        }
+
         fun build(context: Context): ScribeDatabase =
             Room.databaseBuilder(context, ScribeDatabase::class.java, "scribe.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(
+                    MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
+                    MIGRATION_4_5, MIGRATION_5_6,
+                )
                 .build()
     }
 }

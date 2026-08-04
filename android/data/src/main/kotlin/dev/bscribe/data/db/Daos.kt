@@ -96,8 +96,21 @@ interface TranscriptDao {
     @Query("SELECT * FROM transcript_words WHERE recordingId = :recordingId ORDER BY wordIdx")
     suspend fun byRecording(recordingId: String): List<TranscriptWordEntity>
 
-    @Query("SELECT * FROM transcript_words WHERE recordingId = :recordingId ORDER BY wordIdx")
+    @Query(
+        "SELECT * FROM transcript_words WHERE recordingId = :recordingId " +
+            "AND chosen = 1 ORDER BY wordIdx",
+    )
     fun observeByRecording(recordingId: String): Flow<List<TranscriptWordEntity>>
+
+    /** Every reading, chosen or not — what the dual-lane timeline renders. */
+    @Query("SELECT * FROM transcript_words WHERE recordingId = :recordingId ORDER BY t0Ms")
+    fun observeAllVariants(recordingId: String): Flow<List<TranscriptWordEntity>>
+
+    @Query(
+        "UPDATE transcript_words SET chosen = (variant = :variant) " +
+            "WHERE recordingId = :recordingId AND t0Ms < :t1Ms AND t1Ms > :t0Ms",
+    )
+    suspend fun chooseVariant(recordingId: String, t0Ms: Long, t1Ms: Long, variant: String)
 
     @Query("DELETE FROM transcript_words WHERE recordingId = :recordingId")
     suspend fun deleteByRecording(recordingId: String)
@@ -131,4 +144,23 @@ interface ExportDao {
 
     @Query("SELECT * FROM export_records ORDER BY createdAt DESC")
     fun observeAll(): Flow<List<ExportRecordEntity>>
+}
+
+@Dao
+interface LanguageFeedbackDao {
+    @Insert
+    suspend fun insert(feedback: LanguageFeedbackEntity)
+
+    @Query("SELECT * FROM language_feedback WHERE recordingId = :recordingId ORDER BY t0Ms")
+    fun observeByRecording(recordingId: String): Flow<List<LanguageFeedbackEntity>>
+
+    /**
+     * Feedback is keyed by the audio span it refers to, so re-judging the same
+     * utterance replaces the earlier verdict rather than accumulating both.
+     */
+    @Query(
+        "DELETE FROM language_feedback WHERE recordingId = :recordingId " +
+            "AND t0Ms < :t1Ms AND t1Ms > :t0Ms",
+    )
+    suspend fun deleteOverlapping(recordingId: String, t0Ms: Long, t1Ms: Long)
 }

@@ -15,6 +15,7 @@ import dev.bscribe.app.ui.record.RecordScreen
 import dev.bscribe.app.ui.sessions.SessionListScreen
 import dev.bscribe.app.ui.settings.SettingsScreen
 import dev.bscribe.app.ui.theme.ScribeTheme
+import dev.bscribe.app.ui.timeline.TimelineScreen
 import dev.bscribe.app.ui.trash.TrashScreen
 
 object Routes {
@@ -24,6 +25,8 @@ object Routes {
     const val MODELS = "models"
     const val TRASH = "trash"
     const val BENCH = "bench"
+    const val TIMELINE = "timeline/{sessionId}"
+    fun timeline(id: String) = "timeline/$id"
     const val SESSION_DETAIL = "session/{sessionId}"
     fun sessionDetail(id: String) = "session/$id"
 }
@@ -63,7 +66,12 @@ private fun ScribeNavHost(nav: NavHostController) {
             SessionDetailScreen(
                 sessionId = sessionId,
                 onBack = { nav.popBackStack() },
+                onCompare = { nav.navigate(Routes.timeline(sessionId)) },
             )
+        }
+        composable(Routes.TIMELINE) { backStackEntry ->
+            val sessionId = backStackEntry.arguments?.getString("sessionId") ?: return@composable
+            TimelineScreen(sessionId = sessionId, onBack = { nav.popBackStack() })
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(

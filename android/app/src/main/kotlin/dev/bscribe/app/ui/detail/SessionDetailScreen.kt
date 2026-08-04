@@ -223,7 +223,11 @@ class SessionDetailViewModel(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
+fun SessionDetailScreen(
+    sessionId: String,
+    onBack: () -> Unit,
+    onCompare: () -> Unit = {},
+) {
     val context = LocalContext.current
     val viewModel: SessionDetailViewModel =
         viewModel(factory = SessionDetailViewModel.factory(context, sessionId))
@@ -290,6 +294,7 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
                 onWordTap = viewModel::playWord,
                 onTranscribe = { viewModel.retranscribe(context) },
                 onStop = { viewModel.stopTranscribing(context) },
+                onCompare = onCompare,
             )
         }
     }
@@ -356,6 +361,7 @@ private fun TranscriptCard(
     onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
     onTranscribe: () -> Unit,
     onStop: () -> Unit,
+    onCompare: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
@@ -375,6 +381,9 @@ private fun TranscriptCard(
                     // reachable rather than only when a job exists.
                     TextButton(onClick = onStop) { Text("Stop") }
                 } else {
+                    if (groups.isNotEmpty()) {
+                        TextButton(onClick = onCompare) { Text("Compare") }
+                    }
                     TextButton(onClick = onTranscribe) {
                         Text(if (groups.isEmpty()) "Transcribe" else "Redo")
                     }

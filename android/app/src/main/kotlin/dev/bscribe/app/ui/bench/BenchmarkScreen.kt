@@ -132,7 +132,7 @@ class BenchmarkViewModel(
                 threads = threads,
                 audioMs = sample.durationMs,
                 wallMs = System.currentTimeMillis() - startedAt,
-                words = words.size,
+                words = words.chosen.size,
             )
         } finally {
             engine.close()

@@ -1,5 +1,20 @@
 package dev.bscribe.core.asr
 
+/**
+ * The result of a transcription pass.
+ *
+ * Both single-language readings are kept, not just the winner. The rejected
+ * one is not waste: showing the two side by side lets the user say which was
+ * actually right, and that judgement is ground truth for language
+ * identification that no amount of decoding confidence can supply.
+ */
+data class TranscriptPass(
+    /** What the merge chose, utterance by utterance. */
+    val chosen: List<Word>,
+    /** Every language's full reading of the same audio, keyed by ISO code. */
+    val alternatives: Map<String, List<Word>>,
+)
+
 /** One decoder segment — an utterance — from a single-language decode. */
 data class DecodedSegment(
     /** ISO 639-1 code the decode was forced to. */

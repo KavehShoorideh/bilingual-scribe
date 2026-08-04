@@ -2,12 +2,14 @@ package dev.bscribe.data.repo
 
 import dev.bscribe.core.asr.Lang
 import dev.bscribe.core.asr.ScriptLang
+import dev.bscribe.core.asr.TranscriptPass
 import dev.bscribe.core.asr.Word
 import dev.bscribe.core.audio.WavRepair
 import dev.bscribe.core.audio.WavSpec
 import dev.bscribe.core.model.SessionState
 import dev.bscribe.data.db.RecordingEntity
 import dev.bscribe.data.db.ScribeDatabase
+import dev.bscribe.data.db.LanguageFeedbackEntity
 import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
 import dev.bscribe.data.db.TranscriptWordEntity
@@ -30,6 +32,7 @@ class SessionRepository(
     private val sessions get() = db.sessionDao()
     private val recordings get() = db.recordingDao()
     private val transcripts get() = db.transcriptDao()
+    private val feedback get() = db.feedbackDao()
 
     fun observeSessions(): Flow<List<SessionWithRecordings>> = sessions.observeAllWithRecordings()
 
@@ -48,13 +51,13 @@ class SessionRepository(
      */
     suspend fun saveTranscript(
         recordingId: String,
-        words: List<Word>,
+        pass: TranscriptPass,
         modelId: String,
-        turns: IntArray = IntArray(words.size),
+        turns: IntArray = IntArray(pass.chosen.size),
     ) {
         transcripts.deleteByRecording(recordingId)
-        if (words.isEmpty()) return
-        transcripts.insertAll(
+
+        fun rows(words: List<Word>, variant: String, chosen: Boolean) =
             words.mapIndexed { idx, w ->
                 TranscriptWordEntity(
                     recordingId = recordingId,
@@ -66,9 +69,44 @@ class SessionRepository(
                     segmentIdx = w.segmentIdx,
                     modelId = modelId,
                     lang = w.lang.code,
-                    turnIdx = turns.getOrElse(idx) { 0 },
+                    turnIdx = if (chosen) turns.getOrElse(idx) { 0 } else 0,
+                    variant = variant,
+                    chosen = chosen,
                 )
-            },
+            }
+
+        // The chosen reading is stored under variant "" so it survives
+        // independently of which language produced it; the per-language
+        // readings are stored alongside for the comparison view.
+        val all = rows(pass.chosen, variant = CHOSEN_VARIANT, chosen = true) +
+            pass.alternatives.flatMap { (lang, words) ->
+                rows(words, variant = lang, chosen = false)
+            }
+        if (all.isEmpty()) return
+        transcripts.insertAll(all)
+    }
+
+    fun observeAllVariants(recordingId: String): Flow<List<TranscriptWordEntity>> =
+        transcripts.observeAllVariants(recordingId)
+
+    fun observeLanguageFeedback(recordingId: String): Flow<List<LanguageFeedbackEntity>> =
+        feedback.observeByRecording(recordingId)
+
+    /**
+     * Records that the user says a stretch of audio was [lang], and switches
+     * the transcript to that reading.
+     */
+    suspend fun chooseLanguage(recordingId: String, t0Ms: Long, t1Ms: Long, lang: String) {
+        feedback.deleteOverlapping(recordingId, t0Ms, t1Ms)
+        feedback.insert(
+            LanguageFeedbackEntity(
+                id = UUID.randomUUID().toString(),
+                recordingId = recordingId,
+                t0Ms = t0Ms,
+                t1Ms = t1Ms,
+                chosenLang = lang,
+                createdAt = clock(),
+            ),
         )
     }
 
@@ -264,6 +302,9 @@ class SessionRepository(
     )
 
     companion object {
+        /** Variant marker for the merged reading the transcript shows. */
+        const val CHOSEN_VARIANT = ""
+
         /**
          * How long a trashed note is kept. Generous on purpose: audio is small
          * next to the cost of losing a thought, and the user can empty the

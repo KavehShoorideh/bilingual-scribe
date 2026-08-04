@@ -110,6 +110,45 @@ data class TranscriptWordEntity(
      * and turn 2 may well be the same person.
      */
     val turnIdx: Int = 0,
+    /**
+     * Which single-language decode produced this row ("en" or "fa"), as
+     * opposed to [lang], which is the script the word is written in.
+     *
+     * Both readings of the same audio are stored so the UI can show them
+     * side by side; they are distinguished by this, not by lang.
+     */
+    val variant: String = "",
+    /** True for the reading the merge picked — what the transcript shows. */
+    val chosen: Boolean = true,
+)
+
+/**
+ * The user saying which language a stretch of audio actually was.
+ *
+ * Recorded rather than merely applied: decoding confidence cannot tell a
+ * confident wrong answer from a right one, so a human judgement here is
+ * ground truth that the M2 fine-tune can train against.
+ */
+@Entity(
+    tableName = "language_feedback",
+    foreignKeys = [
+        ForeignKey(
+            entity = RecordingEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["recordingId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("recordingId")],
+)
+data class LanguageFeedbackEntity(
+    @PrimaryKey val id: String,
+    val recordingId: String,
+    val t0Ms: Long,
+    val t1Ms: Long,
+    /** "en" | "fa" — the reading the user says was correct. */
+    val chosenLang: String,
+    val createdAt: Long,
 )
 
 /**
