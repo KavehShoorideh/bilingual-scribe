@@ -14,6 +14,9 @@ import dev.bscribe.data.repo.SettingsRepository
 import dev.bscribe.data.repo.TranscribeLanguages
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
@@ -45,6 +48,17 @@ class TranscriptionRunner(
     private val models: ModelRepository,
 ) {
 
+    private val _lastOutcome = MutableStateFlow<TranscribeOutcome?>(null)
+
+    /**
+     * Why the last pass ended. Surfaced in the UI because a transcription that
+     * silently does nothing — no model, or a native failure — is impossible to
+     * tell apart from one that is simply slow.
+     */
+    val lastOutcome: StateFlow<TranscribeOutcome?> = _lastOutcome.asStateFlow()
+
+    fun clearOutcome() { _lastOutcome.value = null }
+
     suspend fun run(
         sessionId: String,
         onProgress: (TranscribeProgress) -> Unit = {},
@@ -55,7 +69,7 @@ class TranscriptionRunner(
             // Not an error: the audio is safe and the pass can be re-run once
             // the model is downloaded.
             Log.i(TAG, "no model installed (${spec.fileName}); leaving session STOPPED")
-            return TranscribeOutcome.NoModel(spec.label)
+            return TranscribeOutcome.NoModel(spec.label).also { _lastOutcome.value = it }
         }
 
         val plan = when (settings.transcribeLanguages.first()) {
@@ -111,7 +125,7 @@ class TranscriptionRunner(
 
             repo.updateLanguageHint(sessionId)
             repo.setState(sessionId, SessionState.TRANSCRIBED)
-            TranscribeOutcome.Done
+            TranscribeOutcome.Done.also { _lastOutcome.value = it }
         } catch (e: CancellationException) {
             // Whatever finished is already saved; park the session so it can
             // be resumed rather than leaving it stuck in TRANSCRIBING.
@@ -125,6 +139,7 @@ class TranscriptionRunner(
             // and a retry must be possible.
             runCatching { repo.setState(sessionId, SessionState.STOPPED) }
             TranscribeOutcome.Failed(e.message ?: e.javaClass.simpleName)
+                .also { _lastOutcome.value = it }
         } finally {
             engine?.close()
         }

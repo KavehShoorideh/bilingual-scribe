@@ -59,6 +59,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import dev.bscribe.app.appContainer
 import dev.bscribe.app.record.RecordingService
+import dev.bscribe.app.record.TranscribeOutcome
 import dev.bscribe.app.util.formatClock
 import dev.bscribe.app.util.formatTimestamp
 import dev.bscribe.core.model.SessionState
@@ -161,9 +162,30 @@ class SessionDetailViewModel(
     }
 
     fun retranscribe(context: Context) {
+        context.appContainer.transcriptionRunner.clearOutcome()
         context.startForegroundService(
             RecordingService.transcribeIntent(context, sessionId),
         )
+    }
+
+    /**
+     * Stops a pass and clears the session's state.
+     *
+     * Also resets the row directly, because a session can be left showing
+     * "Transcribing…" with nothing running at all — a native crash inside
+     * whisper kills the process before any final state is written. Cancelling
+     * the service alone would not fix those.
+     */
+    fun stopTranscribing(context: Context) {
+        // Plain startService, not startForegroundService: this is only ever
+        // called from a visible screen, and a foreground start would oblige a
+        // service that may not even be running to promote itself in 5s.
+        runCatching {
+            context.startService(
+                RecordingService.intent(context, RecordingService.ACTION_CANCEL_TRANSCRIBE),
+            )
+        }
+        viewModelScope.launch { repo.setState(sessionId, SessionState.STOPPED) }
     }
 
     fun rename(title: String) {
@@ -207,6 +229,7 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
     val sessionData by viewModel.session.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val transcript by viewModel.transcript.collectAsState()
+    val outcome by context.appContainer.transcriptionRunner.lastOutcome.collectAsState()
 
     var showRename by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
@@ -262,8 +285,10 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
             TranscriptCard(
                 groups = transcript,
                 state = session?.state,
+                outcome = outcome,
                 onWordTap = viewModel::playWord,
                 onTranscribe = { viewModel.retranscribe(context) },
+                onStop = { viewModel.stopTranscribing(context) },
             )
         }
     }
@@ -326,8 +351,10 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
 private fun TranscriptCard(
     groups: List<TranscriptGroup>,
     state: SessionState?,
+    outcome: TranscribeOutcome?,
     onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
     onTranscribe: () -> Unit,
+    onStop: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
@@ -342,6 +369,10 @@ private fun TranscriptCard(
                 )
                 if (state == SessionState.TRANSCRIBING) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    // A session can sit in TRANSCRIBING with nothing running
+                    // if the process died mid-pass, so this must always be
+                    // reachable rather than only when a job exists.
+                    TextButton(onClick = onStop) { Text("Stop") }
                 } else {
                     TextButton(onClick = onTranscribe) {
                         Text(if (groups.isEmpty()) "Transcribe" else "Redo")
@@ -349,9 +380,27 @@ private fun TranscriptCard(
                 }
             }
 
+            // Why nothing happened, when nothing happened. A pass that fails
+            // silently is indistinguishable from one that is merely slow.
+            when (val o = outcome) {
+                is TranscribeOutcome.NoModel -> Text(
+                    "No speech model installed. Open Settings → Speech models and " +
+                        "download or import ${o.wanted}, then tap Transcribe.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                is TranscribeOutcome.Failed -> Text(
+                    "Transcription failed: ${o.reason}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                else -> Unit
+            }
+
             when {
                 state == SessionState.TRANSCRIBING -> Text(
-                    "Working through the audio. You can leave this screen.",
+                    "Working through the audio. You can leave this screen — " +
+                        "progress is in the notification.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

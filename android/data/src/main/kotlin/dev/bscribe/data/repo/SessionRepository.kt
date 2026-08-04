@@ -208,7 +208,14 @@ class SessionRepository(
                 }
             }
         }
-        val stuck = sessions.byStates(listOf(SessionState.RECORDING, SessionState.PAUSED))
+        // TRANSCRIBING is included because it can only be true while a process
+        // is actively transcribing. Seeing it at startup means the last one
+        // died mid-pass — which a native abort inside whisper does without any
+        // chance to write a final state — and the session would otherwise show
+        // "Transcribing…" forever with nothing running.
+        val stuck = sessions.byStates(
+            listOf(SessionState.RECORDING, SessionState.PAUSED, SessionState.TRANSCRIBING),
+        )
         for (session in stuck) {
             sessions.setState(session.id, SessionState.STOPPED)
         }

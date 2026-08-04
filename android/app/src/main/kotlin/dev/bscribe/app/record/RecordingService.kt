@@ -168,8 +168,17 @@ class RecordingService : Service() {
             // the duration of a pass, so a cancel routed through it could only
             // run once the thing it is cancelling had already finished.
             ACTION_CANCEL_TRANSCRIBE -> {
-                Log.i(TAG, "cancelling transcription")
-                transcribeJob?.cancel()
+                val job = transcribeJob
+                if (job != null) {
+                    Log.i(TAG, "cancelling transcription")
+                    job.cancel()
+                } else if (capture == null) {
+                    // Nothing to cancel — the UI is clearing a session left
+                    // showing "Transcribing…" by a process that died. Don't
+                    // linger as a started service with no work.
+                    Log.i(TAG, "cancel with no pass running; stopping")
+                    stopSelfCleanly()
+                }
             }
             else -> Log.w(TAG, "unknown action ${intent?.action}")
         }
