@@ -26,7 +26,7 @@ class Converters {
         CorrectionEntity::class,
         ExportRecordEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -79,9 +79,19 @@ abstract class ScribeDatabase : RoomDatabase() {
             }
         }
 
+        /** v4 → v5: speaking turn per word. */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE transcript_words " +
+                        "ADD COLUMN turnIdx INTEGER NOT NULL DEFAULT 0",
+                )
+            }
+        }
+
         fun build(context: Context): ScribeDatabase =
             Room.databaseBuilder(context, ScribeDatabase::class.java, "scribe.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
     }
 }

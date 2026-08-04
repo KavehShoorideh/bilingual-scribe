@@ -115,10 +115,11 @@ class MigrationTest {
         }
 
         val db = helper.runMigrationsAndValidate(
-            dbName, 4, true,
+            dbName, 5, true,
             ScribeDatabase.MIGRATION_1_2,
             ScribeDatabase.MIGRATION_2_3,
             ScribeDatabase.MIGRATION_3_4,
+            ScribeDatabase.MIGRATION_4_5,
         )
 
         db.query("SELECT title, deletedAt FROM sessions").use { c ->
@@ -151,10 +152,11 @@ class MigrationTest {
         }
 
         val db = helper.runMigrationsAndValidate(
-            dbName, 4, true,
+            dbName, 5, true,
             ScribeDatabase.MIGRATION_1_2,
             ScribeDatabase.MIGRATION_2_3,
             ScribeDatabase.MIGRATION_3_4,
+            ScribeDatabase.MIGRATION_4_5,
         )
 
         db.query("SELECT title, deletedAt, transcribeWallMs FROM sessions").use { c ->
@@ -175,10 +177,11 @@ class MigrationTest {
     fun `v3 round-trips a trashed and restored note`() {
         helper.createDatabase(dbName, 1).close()
         val db = helper.runMigrationsAndValidate(
-            dbName, 4, true,
+            dbName, 5, true,
             ScribeDatabase.MIGRATION_1_2,
             ScribeDatabase.MIGRATION_2_3,
             ScribeDatabase.MIGRATION_3_4,
+            ScribeDatabase.MIGRATION_4_5,
         )
 
         db.execSQL(

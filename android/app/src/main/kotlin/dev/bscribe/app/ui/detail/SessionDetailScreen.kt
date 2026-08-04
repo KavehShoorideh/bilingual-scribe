@@ -430,25 +430,54 @@ private fun TranscriptCard(
                 )
 
                 else -> groups.forEach { group ->
-                    // Each run of one language gets its own line and its own
-                    // text direction. Mixing scripts inside a single flowing
-                    // row put Farsi and English in the wrong visual order,
-                    // because bidi reordering fights the layout direction.
-                    languageRuns(group.words).forEach { run ->
-                        val rtl = run.lang == "fa"
-                        CompositionLocalProvider(
-                            LocalLayoutDirection provides
-                                if (rtl) LayoutDirection.Rtl else LayoutDirection.Ltr,
-                        ) {
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                run.words.forEach { word ->
-                                    WordChip(word) { onWordTap(group.recordingId, word.t0Ms) }
-                                }
+                    // Split first by speaking turn, then by language. A turn
+                    // change means someone else started talking, which deserves
+                    // a visible break more than a language switch does.
+                    group.words.groupBy { it.turnIdx }.entries
+                        .sortedBy { it.key }
+                        .forEach { (turnIdx, turnWords) ->
+                            if (turnIdx > 0) {
+                                Text(
+                                    "— new voice —",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 12.dp),
+                                )
                             }
+                            LanguageRuns(turnWords, group.recordingId, onWordTap)
                         }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Renders words as runs of a single language, each on its own line with its
+ * own direction — mixing scripts inside one flowing row put Farsi and English
+ * in the wrong visual order, because bidi reordering fights the layout
+ * direction.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LanguageRuns(
+    words: List<TranscriptWordEntity>,
+    recordingId: String,
+    onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
+) {
+    Column {
+        languageRuns(words).forEach { run ->
+            val rtl = run.lang == "fa"
+            CompositionLocalProvider(
+                LocalLayoutDirection provides
+                    if (rtl) LayoutDirection.Rtl else LayoutDirection.Ltr,
+            ) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    run.words.forEach { word ->
+                        WordChip(word) { onWordTap(recordingId, word.t0Ms) }
                     }
                 }
             }

@@ -104,6 +104,12 @@ data class TranscriptWordEntity(
      * here?" is otherwise unanswerable after the fact.
      */
     val avgLogProb: Float = 0f,
+    /**
+     * Which speaking turn this word belongs to. Increments wherever the voice
+     * changes; it is not a speaker *identity*, only a change marker, so turn 0
+     * and turn 2 may well be the same person.
+     */
+    val turnIdx: Int = 0,
 )
 
 /**

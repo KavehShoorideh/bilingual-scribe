@@ -46,7 +46,12 @@ class SessionRepository(
      * crash, or with a better model — is idempotent instead of doubling every
      * word.
      */
-    suspend fun saveTranscript(recordingId: String, words: List<Word>, modelId: String) {
+    suspend fun saveTranscript(
+        recordingId: String,
+        words: List<Word>,
+        modelId: String,
+        turns: IntArray = IntArray(words.size),
+    ) {
         transcripts.deleteByRecording(recordingId)
         if (words.isEmpty()) return
         transcripts.insertAll(
@@ -61,6 +66,7 @@ class SessionRepository(
                     segmentIdx = w.segmentIdx,
                     modelId = modelId,
                     lang = w.lang.code,
+                    turnIdx = turns.getOrElse(idx) { 0 },
                 )
             },
         )

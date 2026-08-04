@@ -5,6 +5,9 @@ import dev.bscribe.asr.LanguagePlan
 import dev.bscribe.asr.ModelFiles
 import dev.bscribe.asr.WhisperEngine
 import dev.bscribe.core.asr.DecodeParams
+import dev.bscribe.core.asr.SpeakerChange
+import dev.bscribe.core.asr.Word
+import dev.bscribe.core.audio.Mfcc
 import dev.bscribe.core.audio.WavReader
 import dev.bscribe.core.model.SessionState
 import dev.bscribe.data.repo.ModelCatalog
@@ -112,7 +115,7 @@ class TranscriptionRunner(
                 ) { startMs, endMs -> WavReader.readRange(wav, startMs, endMs) }
                 // Saved per segment, so cancelling or crashing mid-session
                 // keeps whatever was already transcribed.
-                repo.saveTranscript(recording.id, words, modelId)
+                repo.saveTranscript(recording.id, words, modelId, speakerTurns(wav, words))
                 completedMs += recording.durationMs
             }
             val wallMs = System.currentTimeMillis() - startedAt
@@ -151,7 +154,46 @@ class TranscriptionRunner(
         }
     }
 
+    /**
+     * Marks where the voice changes, so the transcript can start a new
+     * paragraph instead of running two people together.
+     *
+     * Cheap next to the decode — an FFT every 10 ms against a model that takes
+     * seconds per window — so it runs unconditionally rather than behind a
+     * setting. Failure is non-fatal: a transcript with no turn breaks is what
+     * we had before, and is far better than no transcript.
+     */
+    private fun speakerTurns(wav: java.io.File, words: List<Word>): IntArray {
+        if (words.size < 2) return IntArray(words.size)
+        return try {
+            val mfcc = Mfcc()
+            val frames = mutableListOf<DoubleArray>()
+            val end = words.last().t1Ms
+            var at = 0L
+            // Same windowed read as the decode, for the same reason: a long
+            // recording must never be held in memory whole.
+            while (at < end) {
+                val to = minOf(at + FEATURE_WINDOW_MS, end)
+                frames += mfcc.analyse(WavReader.readRange(wav, at, to))
+                at = to
+            }
+            if (frames.isEmpty()) return IntArray(words.size)
+
+            val times = words.map { it.t0Ms to it.t1Ms }
+            SpeakerChange.assignTurns(
+                wordCount = words.size,
+                candidates = SpeakerChange.candidates(times),
+                frames = frames,
+                frameOf = mfcc::frameAt,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "speaker-change detection failed; transcript keeps one turn", e)
+            IntArray(words.size)
+        }
+    }
+
     private companion object {
         const val TAG = "TranscriptionRunner"
+        const val FEATURE_WINDOW_MS = 30_000L
     }
 }
