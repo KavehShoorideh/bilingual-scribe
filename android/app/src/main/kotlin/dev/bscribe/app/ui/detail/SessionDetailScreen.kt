@@ -413,12 +413,24 @@ private fun TranscriptCard(
                 )
 
                 else -> groups.forEach { group ->
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        group.words.forEach { word ->
-                            WordChip(word) { onWordTap(group.recordingId, word.t0Ms) }
+                    // Each run of one language gets its own line and its own
+                    // text direction. Mixing scripts inside a single flowing
+                    // row put Farsi and English in the wrong visual order,
+                    // because bidi reordering fights the layout direction.
+                    languageRuns(group.words).forEach { run ->
+                        val rtl = run.lang == "fa"
+                        CompositionLocalProvider(
+                            LocalLayoutDirection provides
+                                if (rtl) LayoutDirection.Rtl else LayoutDirection.Ltr,
+                        ) {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                run.words.forEach { word ->
+                                    WordChip(word) { onWordTap(group.recordingId, word.t0Ms) }
+                                }
+                            }
                         }
                     }
                 }
@@ -429,24 +441,49 @@ private fun TranscriptCard(
 
 @Composable
 private fun WordChip(word: TranscriptWordEntity, onTap: () -> Unit) {
-    // Farsi is right-to-left; rendering it LTR mangles word order visually
-    // even when the underlying text is correct.
-    val direction = if (word.lang == "fa") LayoutDirection.Rtl else LayoutDirection.Ltr
     // Low-confidence words are muted rather than hidden — knowing whisper was
     // unsure is more useful than a confident-looking wrong word.
     val alpha = if (word.prob < LOW_CONFIDENCE) 0.45f else 1f
+    Text(
+        text = word.text,
+        style = MaterialTheme.typography.bodyLarge,
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+        modifier = Modifier
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onTap)
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+    )
+}
 
-    CompositionLocalProvider(LocalLayoutDirection provides direction) {
-        Text(
-            text = word.text,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
-            modifier = Modifier
-                .clip(MaterialTheme.shapes.small)
-                .clickable(onClick = onTap)
-                .padding(horizontal = 4.dp, vertical = 2.dp),
-        )
+/** A stretch of consecutive words sharing one language. */
+private data class LanguageRun(val lang: String, val words: List<TranscriptWordEntity>)
+
+/**
+ * Splits a transcript into runs at each language change, so the UI can put a
+ * line break between them and give each its own direction.
+ *
+ * Script-neutral words ("und" — numbers, punctuation) continue the run they
+ * are in rather than starting a new one; otherwise a single digit mid-sentence
+ * would break the line in two.
+ */
+private fun languageRuns(words: List<TranscriptWordEntity>): List<LanguageRun> {
+    val runs = mutableListOf<LanguageRun>()
+    var currentLang: String? = null
+    var current = mutableListOf<TranscriptWordEntity>()
+
+    for (word in words) {
+        val lang = word.lang
+        if (lang == "und" || lang == currentLang || currentLang == null) {
+            if (currentLang == null && lang != "und") currentLang = lang
+            current += word
+        } else {
+            runs += LanguageRun(currentLang, current)
+            currentLang = lang
+            current = mutableListOf(word)
+        }
     }
+    if (current.isNotEmpty()) runs += LanguageRun(currentLang ?: "und", current)
+    return runs
 }
 
 private const val LOW_CONFIDENCE = 0.55f

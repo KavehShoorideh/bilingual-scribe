@@ -58,6 +58,14 @@ class WhisperEngine(
         val mutex = Mutex()
     }
 
+    /** One decoder token, before words are reassembled from them. */
+    internal data class Token(
+        val text: String,
+        val t0Ms: Long,
+        val t1Ms: Long,
+        val prob: Float,
+    )
+
     init {
         require(modelFile.isFile) { "model not found: ${modelFile.absolutePath}" }
         // DTW is off deliberately. whisper computes t_dtw per token but never
@@ -206,12 +214,17 @@ class WhisperEngine(
         )
         if (!ok) return@withLock null
 
-        val n = WhisperNative.nativeWordCount(slot.handle)
-        val words = ArrayList<Word>(n)
-        for (i in 0 until n) {
-            val packed = WhisperNative.nativeWordAt(slot.handle, i) ?: continue
-            parseWord(packed)?.let { words += it }
+        val tokens = mutableListOf<Token>()
+        val nSeg = WhisperNative.nativeSegmentCount(slot.handle)
+        for (seg in 0 until nSeg) {
+            val nTok = WhisperNative.nativeTokenCount(slot.handle, seg)
+            for (i in 0 until nTok) {
+                val packed = WhisperNative.nativeTokenAt(ctx, slot.handle, seg, i) ?: continue
+                parseToken(packed)?.let { tokens += it }
+            }
         }
+        val words = wordsFromTokens(tokens)
+
         DecodeResult(
             lang = slot.lang,
             words = words,
@@ -246,23 +259,70 @@ class WhisperEngine(
         val DEFAULT_THREADS: Int =
             Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
 
-        /**
-         * Parses "text\tt0\tt1\tprob\tsegIdx" from the JNI layer. Returns null
-         * for empty text, which whisper emits for pure-silence segments.
-         */
-        internal fun parseWord(packed: String): Word? {
+        /** Parses "text\tt0\tt1\tprob" from the JNI layer. */
+        internal fun parseToken(packed: String): Token? {
+            // Split from the right: token text can itself contain a tab.
             val parts = packed.split('\t')
-            if (parts.size < 5) return null
-            val text = parts[0]
-            if (text.isBlank()) return null
-            return Word(
+            if (parts.size < 4) return null
+            val text = parts.subList(0, parts.size - 3).joinToString("\t")
+            return Token(
                 text = text,
-                t0Ms = parts[1].toLongOrNull() ?: return null,
-                t1Ms = parts[2].toLongOrNull() ?: return null,
-                prob = parts[3].toFloatOrNull() ?: 0f,
-                segmentIdx = parts[4].toIntOrNull() ?: 0,
-                lang = ScriptLang.ofWord(text),
+                t0Ms = parts[parts.size - 3].toLongOrNull() ?: return null,
+                t1Ms = parts[parts.size - 2].toLongOrNull() ?: return null,
+                prob = parts[parts.size - 1].toFloatOrNull() ?: 0f,
             )
+        }
+
+        /**
+         * Reassembles words from decoder tokens.
+         *
+         * A token is not a word. Persian tokenizes to roughly one character per
+         * token, so treating tokens as words split every word into isolated
+         * letters — which also broke Arabic cursive shaping, because the
+         * letters were then laid out as separate runs.
+         *
+         * Whisper marks a word start with a leading space on the token, so a
+         * new word begins at any token whose text starts with whitespace. The
+         * word spans from its first token's start to its last token's end, and
+         * takes the mean probability of its tokens.
+         */
+        internal fun wordsFromTokens(tokens: List<Token>): List<Word> {
+            val words = mutableListOf<Word>()
+            val current = StringBuilder()
+            var t0 = 0L
+            var t1 = 0L
+            var probSum = 0f
+            var count = 0
+
+            fun flush() {
+                val text = current.toString().trim()
+                if (text.isNotEmpty()) {
+                    words += Word(
+                        text = text,
+                        t0Ms = t0,
+                        t1Ms = t1,
+                        prob = if (count > 0) probSum / count else 0f,
+                        segmentIdx = words.size,
+                        lang = ScriptLang.ofWord(text),
+                    )
+                }
+                current.setLength(0)
+                probSum = 0f
+                count = 0
+            }
+
+            for (token in tokens) {
+                if (token.text.isEmpty()) continue
+                val startsWord = token.text.first().isWhitespace()
+                if (startsWord && current.isNotEmpty()) flush()
+                if (current.isEmpty()) t0 = token.t0Ms
+                current.append(token.text)
+                t1 = token.t1Ms
+                probSum += token.prob
+                count++
+            }
+            flush()
+            return words
         }
     }
 }

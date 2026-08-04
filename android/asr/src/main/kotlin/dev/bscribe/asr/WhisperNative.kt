@@ -42,10 +42,17 @@ internal object WhisperNative {
         tokenTimestamps: Boolean,
     ): Boolean
 
-    external fun nativeWordCount(state: Long): Int
+    external fun nativeSegmentCount(state: Long): Int
 
-    /** "text\tt0Ms\tt1Ms\tprob\tsegmentIdx", or null if the index is invalid. */
-    external fun nativeWordAt(state: Long, index: Int): String?
+    external fun nativeTokenCount(state: Long, segment: Int): Int
+
+    /**
+     * "text\tt0Ms\tt1Ms\tprob", or null for special tokens.
+     *
+     * The text keeps its leading space where whisper emitted one — that is the
+     * word-boundary marker [WhisperEngine] reassembles words from.
+     */
+    external fun nativeTokenAt(ctx: Long, state: Long, segment: Int, index: Int): String?
 
     external fun nativeAvgLogProb(state: Long): Float
 }

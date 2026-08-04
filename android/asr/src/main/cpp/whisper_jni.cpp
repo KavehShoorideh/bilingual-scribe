@@ -191,45 +191,61 @@ Java_dev_bscribe_asr_WhisperNative_nativeFull(
 }
 
 JNIEXPORT jint JNICALL
-Java_dev_bscribe_asr_WhisperNative_nativeWordCount(JNIEnv *, jobject, jlong st) {
+Java_dev_bscribe_asr_WhisperNative_nativeSegmentCount(JNIEnv *, jobject, jlong st) {
     if (!st) return 0;
     return whisper_full_n_segments_from_state(st_of(st));
 }
 
+JNIEXPORT jint JNICALL
+Java_dev_bscribe_asr_WhisperNative_nativeTokenCount(
+        JNIEnv *, jobject, jlong st, jint segment) {
+    if (!st) return 0;
+    whisper_state *state = st_of(st);
+    if (segment < 0 || segment >= whisper_full_n_segments_from_state(state)) return 0;
+    return whisper_full_n_tokens_from_state(state, segment);
+}
+
 /**
- * One word, packed as "text\tt0Ms\tt1Ms\tprob\tsegmentIdx".
+ * One token, packed as "text\tt0Ms\tt1Ms\tprob".
  *
- * Packing avoids five JNI round-trips per word; a minute of speech is a couple
- * hundred words and the crossings add up.
+ * Tokens rather than segments because a word is not a token: Persian in
+ * particular tokenizes to roughly one character per token, so treating tokens
+ * as words split every word into isolated letters — which also breaks Arabic
+ * cursive shaping, since the letters are then laid out separately.
+ *
+ * Whisper marks a word boundary by a leading space on the token text, which
+ * the Kotlin side uses to reassemble words. That leading space is therefore
+ * preserved here and must not be trimmed.
+ *
+ * Returns null for special tokens ([_BEG_], timestamps, etc).
  */
 JNIEXPORT jstring JNICALL
-Java_dev_bscribe_asr_WhisperNative_nativeWordAt(JNIEnv *env, jobject, jlong st, jint i) {
-    if (!st) return nullptr;
+Java_dev_bscribe_asr_WhisperNative_nativeTokenAt(
+        JNIEnv *env, jobject, jlong ctx, jlong st, jint segment, jint index) {
+    if (!ctx || !st) return nullptr;
+    whisper_context *context = ctx_of(ctx);
     whisper_state *state = st_of(st);
-    if (i < 0 || i >= whisper_full_n_segments_from_state(state)) return nullptr;
 
-    const char *raw = whisper_full_get_segment_text_from_state(state, i);
-    const std::string text = trim(raw ? raw : "");
+    if (segment < 0 || segment >= whisper_full_n_segments_from_state(state)) return nullptr;
+    if (index < 0 || index >= whisper_full_n_tokens_from_state(state, segment)) return nullptr;
+
+    const whisper_token_data data =
+            whisper_full_get_token_data_from_state(state, segment, index);
+
+    // Anything at or above the end-of-text id is a control token, not speech.
+    if (data.id >= whisper_token_eot(context)) return nullptr;
+
+    const char *text =
+            whisper_full_get_token_text_from_state(context, state, segment, index);
+    if (text == nullptr) return nullptr;
 
     // whisper reports centiseconds.
-    const int64_t t0 = whisper_full_get_segment_t0_from_state(state, i) * 10;
-    const int64_t t1 = whisper_full_get_segment_t1_from_state(state, i) * 10;
-
-    // Mean token probability across the segment: with max_len=1 that is
-    // usually a single token, but words can split into several.
-    float sum = 0.0f;
-    const int nTok = whisper_full_n_tokens_from_state(state, i);
-    int counted = 0;
-    for (int j = 0; j < nTok; ++j) {
-        sum += whisper_full_get_token_p_from_state(state, i, j);
-        ++counted;
-    }
-    const float prob = counted > 0 ? sum / static_cast<float>(counted) : 0.0f;
-
     char buf[64];
-    snprintf(buf, sizeof(buf), "\t%lld\t%lld\t%.4f\t%d",
-             static_cast<long long>(t0), static_cast<long long>(t1), prob, i);
-    return env->NewStringUTF((text + buf).c_str());
+    snprintf(buf, sizeof(buf), "\t%lld\t%lld\t%.4f",
+             static_cast<long long>(data.t0 * 10),
+             static_cast<long long>(data.t1 * 10),
+             data.p);
+    return env->NewStringUTF((std::string(text) + buf).c_str());
 }
 
 /**

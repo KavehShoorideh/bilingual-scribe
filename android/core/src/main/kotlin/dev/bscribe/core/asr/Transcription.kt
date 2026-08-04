@@ -41,8 +41,15 @@ data class DecodeParams(
     /** ISO 639-1 code, or null for autodetect. Multilingual models only. */
     val language: String? = "en",
     val tokenTimestamps: Boolean = true,
-    /** 1 → word-granularity segments for tap targets. */
-    val maxLen: Int = 1,
+    /**
+     * 0 → let whisper segment naturally.
+     *
+     * Was 1, which forces one token per segment. That is not one word per
+     * segment: Persian tokenizes to roughly a character per token, so it split
+     * every Farsi word into isolated letters. Words are reassembled from token
+     * boundaries instead.
+     */
+    val maxLen: Int = 0,
     val beamSize: Int = 1,
     val noContext: Boolean = true,
 )

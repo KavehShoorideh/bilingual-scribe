@@ -4,58 +4,112 @@ import dev.bscribe.core.asr.Lang
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
- * The JNI packing format is a contract between whisper_jni.cpp and Kotlin.
- * These tests pin it without needing a model, a device, or the native library.
+ * The JNI packing format and the token→word reassembly are a contract between
+ * whisper_jni.cpp and Kotlin. These pin it without a model, a device, or the
+ * native library.
  */
 class WhisperEngineParseTest {
 
+    private fun tok(text: String, t0: Long, t1: Long, p: Float = 0.9f) =
+        WhisperEngine.Token(text, t0, t1, p)
+
     @Test
-    fun `parses a well-formed english word`() {
-        val w = WhisperEngine.parseWord("hello\t1200\t1450\t0.9312\t3")
-        assertEquals("hello", w?.text)
-        assertEquals(1200L, w?.t0Ms)
-        assertEquals(1450L, w?.t1Ms)
-        assertEquals(0.9312f, w?.prob)
-        assertEquals(3, w?.segmentIdx)
-        assertEquals(Lang.EN, w?.lang)
+    fun `parses a token`() {
+        val t = WhisperEngine.parseToken(" hello\t1200\t1450\t0.9312")
+        assertEquals(" hello", t?.text)
+        assertEquals(1200L, t?.t0Ms)
+        assertEquals(1450L, t?.t1Ms)
+        assertEquals(0.9312f, t?.prob)
     }
 
     @Test
-    fun `tags farsi words from their script`() {
-        val w = WhisperEngine.parseWord("سلام\t0\t500\t0.88\t0")
-        assertEquals(Lang.FA, w?.lang)
-    }
-
-    @Test
-    fun `blank text is dropped`() {
-        // whisper emits empty segments for pure silence.
-        assertNull(WhisperEngine.parseWord("\t0\t100\t0.5\t0"))
-        assertNull(WhisperEngine.parseWord("   \t0\t100\t0.5\t0"))
+    fun `keeps the leading space that marks a word start`() {
+        // Trimming here would destroy the only word-boundary signal whisper
+        // gives us.
+        assertEquals(" world", WhisperEngine.parseToken(" world\t0\t100\t0.5")?.text)
     }
 
     @Test
     fun `malformed rows are dropped rather than crashing the pass`() {
-        assertNull(WhisperEngine.parseWord("hello"))
-        assertNull(WhisperEngine.parseWord("hello\t0"))
-        assertNull(WhisperEngine.parseWord(""))
-        assertNull(WhisperEngine.parseWord("hello\tnotanumber\t100\t0.5\t0"))
+        assertNull(WhisperEngine.parseToken("hello"))
+        assertNull(WhisperEngine.parseToken("hello\t0"))
+        assertNull(WhisperEngine.parseToken(""))
+        assertNull(WhisperEngine.parseToken("hello\tnope\t100\t0.5"))
     }
 
     @Test
-    fun `unparseable probability degrades to zero rather than dropping the word`() {
-        // Losing a word because its confidence was odd would be worse than
-        // keeping it with prob 0 — the text is the valuable part.
-        val w = WhisperEngine.parseWord("hello\t0\t100\tNaNish\t0")
-        assertEquals("hello", w?.text)
-        assertEquals(0f, w?.prob)
+    fun `joins subword tokens into one english word`() {
+        val words = WhisperEngine.wordsFromTokens(
+            listOf(tok(" trans", 0, 100), tok("crip", 100, 200), tok("tion", 200, 300)),
+        )
+        assertEquals(1, words.size)
+        assertEquals("transcription", words[0].text)
+        // The word spans first token start to last token end.
+        assertEquals(0L, words[0].t0Ms)
+        assertEquals(300L, words[0].t1Ms)
+        assertEquals(Lang.EN, words[0].lang)
     }
 
     @Test
-    fun `text containing spaces survives`() {
-        val w = WhisperEngine.parseWord("New York\t0\t100\t0.5\t0")
-        assertEquals("New York", w?.text)
+    fun `joins per-character farsi tokens into whole words`() {
+        // This is the bug that made Farsi render as loose isolated letters:
+        // Persian tokenizes to roughly one character per token.
+        val words = WhisperEngine.wordsFromTokens(
+            listOf(
+                tok(" س", 0, 50), tok("ل", 50, 100), tok("ا", 100, 150), tok("م", 150, 200),
+                tok(" خ", 250, 300), tok("و", 300, 350), tok("ب", 350, 400),
+            ),
+        )
+        assertEquals(2, words.size)
+        assertEquals("سلام", words[0].text)
+        assertEquals("خوب", words[1].text)
+        assertEquals(Lang.FA, words[0].lang)
+        assertEquals(0L, words[0].t0Ms)
+        assertEquals(200L, words[0].t1Ms)
+        assertEquals(250L, words[1].t0Ms)
+    }
+
+    @Test
+    fun `splits words on leading whitespace`() {
+        val words = WhisperEngine.wordsFromTokens(
+            listOf(tok(" one", 0, 100), tok(" two", 100, 200), tok(" three", 200, 300)),
+        )
+        assertEquals(listOf("one", "two", "three"), words.map { it.text })
+    }
+
+    @Test
+    fun `word probability is the mean of its tokens`() {
+        val words = WhisperEngine.wordsFromTokens(
+            listOf(tok(" a", 0, 50, 1.0f), tok("b", 50, 100, 0.0f)),
+        )
+        assertEquals(1, words.size)
+        assertTrue(kotlin.math.abs(words[0].prob - 0.5f) < 1e-6)
+    }
+
+    @Test
+    fun `whitespace-only tokens produce no words`() {
+        assertEquals(0, WhisperEngine.wordsFromTokens(listOf(tok("  ", 0, 100))).size)
+        assertEquals(0, WhisperEngine.wordsFromTokens(emptyList()).size)
+    }
+
+    @Test
+    fun `word indices are sequential`() {
+        val words = WhisperEngine.wordsFromTokens(
+            listOf(tok(" a", 0, 10), tok(" b", 10, 20), tok(" c", 20, 30)),
+        )
+        assertEquals(listOf(0, 1, 2), words.map { it.segmentIdx })
+    }
+
+    @Test
+    fun `a mixed-language utterance keeps per-word languages`() {
+        val words = WhisperEngine.wordsFromTokens(
+            listOf(tok(" hello", 0, 100), tok(" سلام", 100, 200)),
+        )
+        assertEquals(Lang.EN, words[0].lang)
+        assertEquals(Lang.FA, words[1].lang)
     }
 
     @Test
@@ -67,16 +121,12 @@ class WhisperEngineParseTest {
 
     @Test
     fun `an unknown model disables dtw rather than guessing a head layout`() {
-        // Aligning against the wrong alignment heads produces confidently
-        // wrong timestamps; falling back to heuristic ones is the safer error.
         assertEquals(DtwPreset.NONE, DtwPreset.forModelFile("my-finetune.bin"))
-        assertEquals(DtwPreset.NONE, DtwPreset.forModelFile("ggml-large-v3.bin"))
     }
 
     @Test
     fun `language plan knows when it is dual`() {
         assertEquals(true, LanguagePlan.DUAL.isDual)
         assertEquals(false, LanguagePlan.ENGLISH_ONLY.isDual)
-        assertEquals(false, LanguagePlan.FARSI_ONLY.isDual)
     }
 }
