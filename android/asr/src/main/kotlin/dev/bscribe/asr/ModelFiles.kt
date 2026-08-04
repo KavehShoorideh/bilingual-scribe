@@ -6,7 +6,10 @@ import java.security.MessageDigest
 /**
  * Naming and identity for on-device whisper models.
  *
- * Models live in `<filesDir>/models/*.bin` (ggml format). A model's identity
+ * Models live in `<filesDir>/models/` as `.bin` files (ggml format). Note the
+ * path is spelled out rather than globbed: Kotlin block comments nest, so a
+ * literal slash-star inside this KDoc would swallow the rest of the file.
+ * A model's identity
  * string — recorded on every transcript word and export — is
  * `<filename>:sha256:<first 12 hex chars>` so a transcript can always be
  * traced to the exact weights that produced it, including personal fine-tunes
