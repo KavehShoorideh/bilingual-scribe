@@ -10,7 +10,30 @@ data class Word(
     val prob: Float,
     /** Decoder segment the word came from; groups words into utterances. */
     val segmentIdx: Int,
+    /**
+     * Which language this word is in, from its script (see [ScriptLang]).
+     * Script-neutral tokens are resolved to the language their window decoded
+     * as, so this should rarely be [Lang.UND] by the time it reaches storage.
+     */
+    val lang: Lang = Lang.UND,
 )
+
+/**
+ * Whole-file transcription — the accurate pass that runs once recording stops.
+ *
+ * Separate from [LiveTranscriber] because the two have opposite priorities:
+ * live transcription may drop audio to keep up, while this must not miss a
+ * word and is allowed to take its time.
+ */
+interface BatchTranscriber {
+    /**
+     * @param pcm 16 kHz mono PCM16, as [dev.bscribe.core.audio.WavReader] returns.
+     */
+    suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word>
+
+    /** Releases native resources. Not idempotent-safe to skip. */
+    fun close()
+}
 
 /** Parameters for a whisper decode. Mirrors the JNI surface (M1a). */
 data class DecodeParams(

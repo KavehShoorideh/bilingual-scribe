@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "dev.bscribe.asr"
     compileSdk = 36
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         minSdk = 33
@@ -18,8 +19,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // M1a wires externalNativeBuild { cmake { path = "src/main/cpp/CMakeLists.txt" } }
-    // against ../third_party/whisper.cpp (GGML_VULKAN=OFF, CPU only).
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
+    }
 }
 
 kotlin {
