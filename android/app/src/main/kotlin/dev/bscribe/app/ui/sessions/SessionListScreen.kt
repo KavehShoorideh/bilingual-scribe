@@ -33,7 +33,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import dev.bscribe.app.BuildConfig
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -114,27 +116,39 @@ fun SessionListScreen(
             )
         },
     ) { padding ->
-        if (sessions.isEmpty()) {
-            Column(
-                modifier = Modifier.fillMaxSize().padding(padding).padding(32.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text("No notes yet", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Tap Record and just talk — the audio is saved no matter what.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(sessions, key = { it.session.id }) { row ->
-                    SessionCard(row, onClick = { onOpenSession(row.session.id) })
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            if (sessions.isEmpty()) {
+                Column(
+                    modifier = Modifier.weight(1f).fillMaxWidth().padding(32.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text("No notes yet", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Tap Record and just talk — the audio is saved no matter what.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(sessions, key = { it.session.id }) { row ->
+                        SessionCard(row, onClick = { onOpenSession(row.session.id) })
+                    }
                 }
             }
+
+            // Visible build stamp: the quickest way to confirm an update
+            // actually landed, without digging into Settings.
+            Text(
+                "v${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+            )
         }
     }
 }
