@@ -70,6 +70,35 @@ class SessionRepository(
      * Records what languages actually turned up in a session, for the export
      * bundle's `language_hint` (docs/dataset-format.md).
      */
+    /**
+     * The most recent recording with real audio, for benchmarking against
+     * something the user actually said rather than a bundled sample.
+     */
+    suspend fun newestRecording(minDurationMs: Long = 2_000): Pair<File, Long>? {
+        for (rec in recordings.recent(minDurationMs, limit = 5)) {
+            val file = resolveWav(rec)
+            if (file.isFile) return file to rec.durationMs
+        }
+        return null
+    }
+
+    /** Records what the last pass cost, so "slow" becomes a number. */
+    suspend fun recordPassTiming(
+        sessionId: String,
+        wallMs: Long,
+        audioMs: Long,
+        model: String,
+    ) {
+        val current = sessions.byId(sessionId) ?: return
+        sessions.update(
+            current.copy(
+                transcribeWallMs = wallMs,
+                transcribeAudioMs = audioMs,
+                transcribeModel = model,
+            ),
+        )
+    }
+
     suspend fun updateLanguageHint(sessionId: String) {
         val langs = recordingsOf(sessionId)
             .flatMap { transcriptOf(it.id) }

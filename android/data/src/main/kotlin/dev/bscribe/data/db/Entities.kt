@@ -24,6 +24,16 @@ data class SessionEntity(
      * a mis-tap on Delete was the one remaining way to lose one.
      */
     val deletedAt: Long? = null,
+    /**
+     * How long the last transcription pass took, and how much audio it covered.
+     *
+     * Kept so the cost of a pass is visible per note instead of guessed at —
+     * "slow" is not actionable, "1.8x realtime on Base with both languages" is.
+     */
+    val transcribeWallMs: Long? = null,
+    val transcribeAudioMs: Long? = null,
+    /** Which model produced the current transcript, for the same reason. */
+    val transcribeModel: String? = null,
 )
 
 /**

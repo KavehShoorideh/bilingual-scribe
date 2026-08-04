@@ -63,6 +63,7 @@ import dev.bscribe.app.record.TranscribeOutcome
 import dev.bscribe.app.util.formatClock
 import dev.bscribe.app.util.formatTimestamp
 import dev.bscribe.core.model.SessionState
+import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
 import dev.bscribe.data.db.TranscriptWordEntity
 import dev.bscribe.data.repo.SessionRepository
@@ -284,7 +285,7 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
 
             TranscriptCard(
                 groups = transcript,
-                state = session?.state,
+                session = session,
                 outcome = outcome,
                 onWordTap = viewModel::playWord,
                 onTranscribe = { viewModel.retranscribe(context) },
@@ -350,7 +351,7 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
 @Composable
 private fun TranscriptCard(
     groups: List<TranscriptGroup>,
-    state: SessionState?,
+    session: SessionEntity?,
     outcome: TranscribeOutcome?,
     onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
     onTranscribe: () -> Unit,
@@ -367,7 +368,7 @@ private fun TranscriptCard(
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f),
                 )
-                if (state == SessionState.TRANSCRIBING) {
+                if (session?.state == SessionState.TRANSCRIBING) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     // A session can sit in TRANSCRIBING with nothing running
                     // if the process died mid-pass, so this must always be
@@ -378,6 +379,22 @@ private fun TranscriptCard(
                         Text(if (groups.isEmpty()) "Transcribe" else "Redo")
                     }
                 }
+            }
+
+            // What the last pass actually cost. "Slow" is not actionable;
+            // "1.8x realtime on Base with both languages" tells you which
+            // setting to change.
+            if (session?.transcribeWallMs != null && session.transcribeAudioMs != null) {
+                val rtf = session.transcribeWallMs!!.toDouble() /
+                    session.transcribeAudioMs!!.coerceAtLeast(1)
+                Text(
+                    "Took ${formatClock(session.transcribeWallMs!!)} for " +
+                        "${formatClock(session.transcribeAudioMs!!)} of audio " +
+                        "(${"%.1f".format(rtf)}× realtime)" +
+                        (session.transcribeModel?.let { " · $it" } ?: ""),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             // Why nothing happened, when nothing happened. A pass that fails
@@ -398,7 +415,7 @@ private fun TranscriptCard(
             }
 
             when {
-                state == SessionState.TRANSCRIBING -> Text(
+                session?.state == SessionState.TRANSCRIBING -> Text(
                     "Working through the audio. You can leave this screen — " +
                         "progress is in the notification.",
                     style = MaterialTheme.typography.bodyMedium,

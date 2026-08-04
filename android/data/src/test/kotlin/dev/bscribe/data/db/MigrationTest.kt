@@ -115,8 +115,10 @@ class MigrationTest {
         }
 
         val db = helper.runMigrationsAndValidate(
-            dbName, 3, true,
-            ScribeDatabase.MIGRATION_1_2, ScribeDatabase.MIGRATION_2_3,
+            dbName, 4, true,
+            ScribeDatabase.MIGRATION_1_2,
+            ScribeDatabase.MIGRATION_2_3,
+            ScribeDatabase.MIGRATION_3_4,
         )
 
         db.query("SELECT title, deletedAt FROM sessions").use { c ->
@@ -129,11 +131,54 @@ class MigrationTest {
     }
 
     @Test
+    fun `v1 through v4 preserves a note and its transcript`() {
+        helper.createDatabase(dbName, 1).use { db ->
+            db.execSQL(
+                "INSERT INTO sessions (id, title, createdAt, state, languageHint, reviewedAt) " +
+                    "VALUES ('s1', 'Kept', 1000, 'TRANSCRIBED', 'mixed', NULL)",
+            )
+            db.execSQL(
+                "INSERT INTO recordings " +
+                    "(id, sessionId, idx, wavPath, startedWallClock, durationMs, " +
+                    "sampleRate, finalized) " +
+                    "VALUES ('r1', 's1', 0, 's1/seg000.wav', 1000, 5000, 16000, 1)",
+            )
+            db.execSQL(
+                "INSERT INTO transcript_words " +
+                    "(recordingId, wordIdx, text, t0Ms, t1Ms, prob, segmentIdx, modelId) " +
+                    "VALUES ('r1', 0, 'سلام', 0, 500, 0.9, 0, 'm')",
+            )
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            dbName, 4, true,
+            ScribeDatabase.MIGRATION_1_2,
+            ScribeDatabase.MIGRATION_2_3,
+            ScribeDatabase.MIGRATION_3_4,
+        )
+
+        db.query("SELECT title, deletedAt, transcribeWallMs FROM sessions").use { c ->
+            assertTrue(c.moveToFirst(), "the note must survive three migrations")
+            assertEquals("Kept", c.getString(0))
+            assertTrue(c.isNull(1), "must not be trashed by a migration")
+            // Notes transcribed before timing existed have no timing to report,
+            // which must read as unknown rather than as an instantaneous pass.
+            assertTrue(c.isNull(2), "timing must be NULL, not 0")
+        }
+        db.query("SELECT text FROM transcript_words").use { c ->
+            assertTrue(c.moveToFirst(), "transcript words must survive")
+            assertEquals("سلام", c.getString(0))
+        }
+    }
+
+    @Test
     fun `v3 round-trips a trashed and restored note`() {
         helper.createDatabase(dbName, 1).close()
         val db = helper.runMigrationsAndValidate(
-            dbName, 3, true,
-            ScribeDatabase.MIGRATION_1_2, ScribeDatabase.MIGRATION_2_3,
+            dbName, 4, true,
+            ScribeDatabase.MIGRATION_1_2,
+            ScribeDatabase.MIGRATION_2_3,
+            ScribeDatabase.MIGRATION_3_4,
         )
 
         db.execSQL(

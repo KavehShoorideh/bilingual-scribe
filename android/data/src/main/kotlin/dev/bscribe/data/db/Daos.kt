@@ -80,6 +80,12 @@ interface RecordingDao {
 
     @Query("SELECT * FROM recordings WHERE finalized = 0")
     suspend fun unfinalized(): List<RecordingEntity>
+
+    @Query(
+        "SELECT * FROM recordings WHERE durationMs > :minDurationMs " +
+            "ORDER BY startedWallClock DESC LIMIT :limit",
+    )
+    suspend fun recent(minDurationMs: Long, limit: Int): List<RecordingEntity>
 }
 
 @Dao

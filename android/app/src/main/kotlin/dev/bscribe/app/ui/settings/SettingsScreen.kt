@@ -47,7 +47,11 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onOpenModels: () -> Unit = {}) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    onOpenModels: () -> Unit = {},
+    onOpenBenchmark: () -> Unit = {},
+) {
     val context = LocalContext.current
     val vm: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(context))
     val mode by vm.liveMode.collectAsState()
@@ -96,6 +100,23 @@ fun SettingsScreen(onBack: () -> Unit, onOpenModels: () -> Unit = {}) {
                     Text("Speech models", style = MaterialTheme.typography.bodyLarge)
                     Text(
                         "Download or switch the model used for transcription",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenBenchmark)
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Benchmark", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Measure how fast each model runs on this phone",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

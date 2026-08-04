@@ -8,6 +8,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import dev.bscribe.app.ui.bench.BenchmarkScreen
 import dev.bscribe.app.ui.detail.SessionDetailScreen
 import dev.bscribe.app.ui.models.ModelsScreen
 import dev.bscribe.app.ui.record.RecordScreen
@@ -22,6 +23,7 @@ object Routes {
     const val SETTINGS = "settings"
     const val MODELS = "models"
     const val TRASH = "trash"
+    const val BENCH = "bench"
     const val SESSION_DETAIL = "session/{sessionId}"
     fun sessionDetail(id: String) = "session/$id"
 }
@@ -67,6 +69,7 @@ private fun ScribeNavHost(nav: NavHostController) {
             SettingsScreen(
                 onBack = { nav.popBackStack() },
                 onOpenModels = { nav.navigate(Routes.MODELS) },
+                onOpenBenchmark = { nav.navigate(Routes.BENCH) },
             )
         }
         composable(Routes.MODELS) {
@@ -74,6 +77,9 @@ private fun ScribeNavHost(nav: NavHostController) {
         }
         composable(Routes.TRASH) {
             TrashScreen(onBack = { nav.popBackStack() })
+        }
+        composable(Routes.BENCH) {
+            BenchmarkScreen(onBack = { nav.popBackStack() })
         }
     }
 }

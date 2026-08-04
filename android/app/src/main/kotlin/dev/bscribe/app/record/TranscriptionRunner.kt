@@ -123,6 +123,12 @@ class TranscriptionRunner(
                     "model=${spec.label}, langs=${plan.codes}, threads=$threads",
             )
 
+            repo.recordPassTiming(
+                sessionId = sessionId,
+                wallMs = wallMs,
+                audioMs = totalMs,
+                model = "${spec.label} · ${plan.codes.joinToString("+")} · ${threads}t",
+            )
             repo.updateLanguageHint(sessionId)
             repo.setState(sessionId, SessionState.TRANSCRIBED)
             TranscribeOutcome.Done.also { _lastOutcome.value = it }
