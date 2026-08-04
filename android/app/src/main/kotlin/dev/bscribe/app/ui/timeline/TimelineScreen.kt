@@ -90,6 +90,30 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
                 modifier = Modifier.padding(16.dp),
             )
 
+            val measurer = rememberTextMeasurer()
+            val style = MaterialTheme.typography.bodyLarge
+            val density = LocalDensity.current
+            val chipPaddingPx = with(density) { 12.dp.toPx() }
+
+            // One layout for both lanes. Laying each out on its own would let
+            // the denser lane drift right of the other, and the marker would
+            // then sit on two different moments — which is precisely the
+            // comparison this screen exists to make.
+            val layout = remember(lanes, style) {
+                fun items(ws: List<TimelineWord>) = ws.map { w ->
+                    TimelineLayout.Item(
+                        w.t0Ms,
+                        w.t1Ms,
+                        measurer.measure(w.text, style).size.width + chipPaddingPx,
+                    )
+                }
+                TimelineLayout.place(
+                    listOf(items(lanes.english), items(lanes.farsi)),
+                    PX_PER_MS,
+                )
+            }
+            val playhead = layout.mapping.xOf(positionMs)
+
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -103,17 +127,21 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
             ) {
                 Lane(
                     words = lanes.english,
-                    nowMs = positionMs,
+                    placed = layout.lanes[0],
+                    playheadX = playhead,
                     mirrored = false,
                     label = "English",
+                    style = style,
                     onTap = { w -> vm.chooseLanguage("en", w.t0Ms, w.t1Ms) },
                     modifier = Modifier.align(Alignment.TopCenter),
                 )
                 Lane(
                     words = lanes.farsi,
-                    nowMs = positionMs,
+                    placed = layout.lanes[1],
+                    playheadX = playhead,
                     mirrored = true,
                     label = "فارسی",
+                    style = style,
                     onTap = { w -> vm.chooseLanguage("fa", w.t0Ms, w.t1Ms) },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
@@ -156,30 +184,15 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
 @Composable
 private fun Lane(
     words: List<TimelineWord>,
-    nowMs: Long,
+    placed: List<TimelineLayout.Placed>,
+    playheadX: Float,
     mirrored: Boolean,
     label: String,
+    style: androidx.compose.ui.text.TextStyle,
     onTap: (TimelineWord) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val measurer = rememberTextMeasurer()
-    val style = MaterialTheme.typography.bodyLarge
     val density = LocalDensity.current
-    val chipPaddingPx = with(density) { 12.dp.toPx() }
-
-    // Words are placed by measured width as well as time, because speech runs
-    // faster than text can be read: four words a second occupy a few pixels of
-    // timeline but need far more to be legible, so placing by time alone piled
-    // them on top of each other exactly where there was most to read.
-    val items = remember(words, style) {
-        words.map { w ->
-            val width = measurer.measure(w.text, style).size.width + chipPaddingPx
-            TimelineLayout.Item(w.t0Ms, w.t1Ms, width)
-        }
-    }
-    val placed = remember(items) { TimelineLayout.place(items, PX_PER_MS) }
-    val playhead = TimelineLayout.playheadX(items, placed, nowMs, PX_PER_MS)
-
     val halfWidthPx = with(density) { LANE_HALF_WIDTH_DP.dp.toPx() }
 
     Box(modifier.fillMaxWidth().height(120.dp)) {
@@ -191,16 +204,15 @@ private fun Lane(
         )
 
         placed.forEachIndexed { i, p ->
-            val relative = p.xPx - playhead
+            val relative = p.xPx - playheadX
             // Skip anything off-screen: a long recording has thousands of
             // words and composing them all would cost far more than it shows.
             if (relative + p.widthPx < -halfWidthPx || relative > halfWidthPx) return@forEachIndexed
 
-            val word = words[i]
+            val word = words.getOrNull(i) ?: return@forEachIndexed
             // Mirroring is what lets Farsi read right-to-left while still
             // lining up in time with the English above it. The width is
-            // subtracted so the word's trailing edge, not its leading one,
-            // meets the playhead.
+            // subtracted so the word's trailing edge meets the playhead.
             val dx = if (mirrored) -(relative + p.widthPx) else relative
 
             Box(
