@@ -38,24 +38,35 @@ runs on *your* computer.
 
 ## Building
 
-The app builds on any machine with JDK 17+ and the Android SDK:
+The app builds on any machine with JDK 17+ and the Android SDK. The Gradle
+wrapper is committed, so no bootstrap step is needed:
 
 ```sh
 git clone --recurse-submodules <this repo>
 cd android
-gradle wrapper --gradle-version 8.14.3   # once — wrapper jar is not committed yet
 ./gradlew :app:assembleDebug             # APK at app/build/outputs/apk/debug/
 ```
 
+Use `./gradlew`, not a system `gradle` — the wrapper is pinned to Gradle 8.13
+and Gradle 9.6+ cannot configure this project at all (it removed an internal
+API that AGP 8.13 still uses).
+
 CI (GitHub Actions) builds a sideloadable debug APK on every push — grab it
-from the workflow run's artifacts.
+from the workflow run's artifacts. Tagging `v*` cuts a signed GitHub Release,
+which is what Obtainium on the phone installs from.
 
 Pure-JVM logic tests (no Android SDK needed): `./gradlew :core:test`.
+
+Full toolchain setup, adb pairing, and the update flow:
+[`docs/build-and-install.md`](docs/build-and-install.md).
 
 ## Status
 
 - [x] Plan (`docs/architecture.md`)
-- [ ] **M0 — Trustworthy recorder**: crash-safe capture, pause/resume, sessions (in progress)
+- [x] M0.5 — Build system: wrapper, green build, CI, signed releases
+- [ ] **M0 — Trustworthy recorder**: crash-safe capture, pause/resume, sessions
+      (code complete and building; not yet verified on hardware — see
+      `docs/device-test-plan.md`)
 - [ ] M1a — On-device transcription (final pass, word chips)
 - [ ] M1b — Live rough transcript while speaking
 - [ ] M1c — Tap-to-fix corrections + dataset export
