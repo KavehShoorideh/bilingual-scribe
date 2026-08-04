@@ -8,11 +8,13 @@ import dev.bscribe.core.asr.Lang
 import dev.bscribe.core.asr.ScriptLang
 import dev.bscribe.core.asr.Word
 import dev.bscribe.core.audio.PcmConvert
+import android.util.Log
 import java.io.Closeable
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -107,12 +109,17 @@ class WhisperEngine(
     suspend fun transcribeWindowed(
         durationMs: Long,
         params: DecodeParams,
+        onWindow: (doneMs: Long, totalMs: Long) -> Unit = { _, _ -> },
         readWindow: (startMs: Long, endMs: Long) -> ShortArray,
     ): List<Word> = withContext(Dispatchers.Default) {
         val words = mutableListOf<Word>()
         var startMs = 0L
 
         while (startMs < durationMs) {
+            // Cooperative cancellation: without this a long pass ignores the
+            // user cancelling and keeps burning battery to the end.
+            ensureActive()
+
             val endMs = minOf(startMs + WINDOW_MS, durationMs)
             // Trailing scraps are noise, not speech; whisper hallucinates
             // rather than reporting silence on them.
@@ -122,7 +129,20 @@ class WhisperEngine(
             if (chunk.isEmpty()) break
 
             val float = PcmConvert.toFloatMono(chunk)
+            val startedAt = System.nanoTime()
             val winner = decodeWindow(float, params)
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+            // Realtime factor per window: the number that says whether live
+            // transcription (M1b) is even possible on this hardware.
+            val audioMs = endMs - startMs
+            Log.i(
+                TAG,
+                "window ${startMs}..${endMs}ms decoded in ${elapsedMs}ms " +
+                    "(RTF ${"%.2f".format(elapsedMs.toDouble() / audioMs)}, " +
+                    "${slots.size} lang x $threadsPerDecode threads)",
+            )
+
             if (winner != null) {
                 val windowLang = if (winner.lang == "fa") Lang.FA else Lang.EN
                 winner.words.forEach { w ->
@@ -136,6 +156,7 @@ class WhisperEngine(
                 }
             }
             startMs = endMs
+            onWindow(startMs, durationMs)
         }
 
         words.mapIndexed { i, w -> w.copy(segmentIdx = i) }
@@ -193,6 +214,7 @@ class WhisperEngine(
     }
 
     companion object {
+        private const val TAG = "WhisperEngine"
         private const val SAMPLE_RATE = 16_000
 
         /** whisper's native context length. */

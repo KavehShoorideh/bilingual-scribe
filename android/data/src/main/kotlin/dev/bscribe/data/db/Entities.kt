@@ -16,6 +16,14 @@ data class SessionEntity(
     /** "en" | "fa" | "mixed" | null (autodetect). Drives decode + export. */
     val languageHint: String?,
     val reviewedAt: Long?,
+    /**
+     * When the note was moved to the trash, or null if it is live.
+     *
+     * Deleting is a soft delete: the audio stays on disk until the note is
+     * purged. The whole point of this app is that an idea is never lost, and
+     * a mis-tap on Delete was the one remaining way to lose one.
+     */
+    val deletedAt: Long? = null,
 )
 
 /**

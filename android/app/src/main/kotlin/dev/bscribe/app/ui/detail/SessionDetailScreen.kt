@@ -170,10 +170,11 @@ class SessionDetailViewModel(
         viewModelScope.launch { repo.setTitle(sessionId, title.ifBlank { null }) }
     }
 
+    /** Moves the note to the trash; nothing is erased until it's purged. */
     fun delete(onDone: () -> Unit) {
         viewModelScope.launch {
             player.stop()
-            repo.deleteSession(sessionId)
+            repo.trashSession(sessionId)
             onDone()
         }
     }
@@ -294,11 +295,16 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
     if (showDelete) {
         AlertDialog(
             onDismissRequest = { showDelete = false },
-            title = { Text("Delete note?") },
-            text = { Text("The audio and everything derived from it will be removed from this phone.") },
+            title = { Text("Move to trash?") },
+            text = {
+                Text(
+                    "The note moves to the trash and stays there for 30 days. " +
+                        "Nothing is erased until you empty it.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { showDelete = false; viewModel.delete(onDone = onBack) }) {
-                    Text("Delete")
+                    Text("Move to trash")
                 }
             },
             dismissButton = {

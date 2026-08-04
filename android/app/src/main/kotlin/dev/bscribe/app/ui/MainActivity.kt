@@ -14,12 +14,14 @@ import dev.bscribe.app.ui.record.RecordScreen
 import dev.bscribe.app.ui.sessions.SessionListScreen
 import dev.bscribe.app.ui.settings.SettingsScreen
 import dev.bscribe.app.ui.theme.ScribeTheme
+import dev.bscribe.app.ui.trash.TrashScreen
 
 object Routes {
     const val SESSIONS = "sessions"
     const val RECORD = "record"
     const val SETTINGS = "settings"
     const val MODELS = "models"
+    const val TRASH = "trash"
     const val SESSION_DETAIL = "session/{sessionId}"
     fun sessionDetail(id: String) = "session/$id"
 }
@@ -43,6 +45,7 @@ private fun ScribeNavHost(nav: NavHostController) {
                 onRecord = { nav.navigate(Routes.RECORD) },
                 onOpenSession = { id -> nav.navigate(Routes.sessionDetail(id)) },
                 onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+                onOpenTrash = { nav.navigate(Routes.TRASH) },
             )
         }
         composable(Routes.RECORD) {
@@ -68,6 +71,9 @@ private fun ScribeNavHost(nav: NavHostController) {
         }
         composable(Routes.MODELS) {
             ModelsScreen(onBack = { nav.popBackStack() })
+        }
+        composable(Routes.TRASH) {
+            TrashScreen(onBack = { nav.popBackStack() })
         }
     }
 }

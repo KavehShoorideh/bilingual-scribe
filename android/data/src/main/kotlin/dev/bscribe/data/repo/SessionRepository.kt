@@ -135,10 +135,49 @@ class SessionRepository(
 
     suspend fun setTitle(sessionId: String, title: String?) = sessions.setTitle(sessionId, title)
 
+    fun observeTrash(): Flow<List<SessionWithRecordings>> = sessions.observeTrashWithRecordings()
+
+    /**
+     * Moves a note to the trash. Nothing is erased — the rows stay and the
+     * audio stays on disk.
+     *
+     * A mis-tap on Delete was the last remaining way to lose a recording in an
+     * app whose entire premise is that you can't.
+     */
+    suspend fun trashSession(sessionId: String) {
+        sessions.setDeletedAt(sessionId, clock())
+    }
+
+    suspend fun restoreSession(sessionId: String) {
+        sessions.setDeletedAt(sessionId, null)
+    }
+
+    /** Erases a note for real: rows cascade, audio is deleted. */
     suspend fun deleteSession(sessionId: String) {
-        // Rows cascade; audio files go with them.
         sessions.delete(sessionId)
         File(audioRoot, sessionId).deleteRecursively()
+    }
+
+    /** @return how many notes were erased. */
+    suspend fun emptyTrash(): Int {
+        val all = sessions.trashedBefore(Long.MAX_VALUE)
+        all.forEach { deleteSession(it.id) }
+        return all.size
+    }
+
+    /**
+     * Purges notes trashed longer ago than [retentionMs].
+     *
+     * Run at startup rather than on a timer: a note you deleted a month ago
+     * and never asked about is safe to remove, but only on the user's own
+     * schedule of opening the app.
+     *
+     * @return how many notes were erased.
+     */
+    suspend fun purgeExpiredTrash(retentionMs: Long = TRASH_RETENTION_MS): Int {
+        val expired = sessions.trashedBefore(clock() - retentionMs)
+        expired.forEach { deleteSession(it.id) }
+        return expired.size
     }
 
     /**
@@ -181,4 +220,13 @@ class SessionRepository(
         val emptySegments: Int,
         val recoveredSessions: Int,
     )
+
+    companion object {
+        /**
+         * How long a trashed note is kept. Generous on purpose: audio is small
+         * next to the cost of losing a thought, and the user can empty the
+         * trash themselves whenever they want the space back.
+         */
+        const val TRASH_RETENTION_MS = 30L * 24 * 60 * 60 * 1000
+    }
 }

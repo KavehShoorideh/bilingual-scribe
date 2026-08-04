@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AssistChip
@@ -73,6 +74,7 @@ fun SessionListScreen(
     onRecord: () -> Unit,
     onOpenSession: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenTrash: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val viewModel: SessionListViewModel =
@@ -95,6 +97,9 @@ fun SessionListScreen(
             TopAppBar(
                 title = { Text("Bilingual Scribe") },
                 actions = {
+                    IconButton(onClick = onOpenTrash) {
+                        Icon(Icons.Default.Delete, contentDescription = "Trash")
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                     }

@@ -26,7 +26,7 @@ class Converters {
         CorrectionEntity::class,
         ExportRecordEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -60,9 +60,19 @@ abstract class ScribeDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v2 → v3: soft delete. Existing notes are live, so the column
+         * defaults to NULL and nothing lands in the trash retroactively.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE sessions ADD COLUMN deletedAt INTEGER DEFAULT NULL")
+            }
+        }
+
         fun build(context: Context): ScribeDatabase =
             Room.databaseBuilder(context, ScribeDatabase::class.java, "scribe.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
     }
 }

@@ -25,6 +25,12 @@ class ScribeApplication : Application() {
             if (report.repairedSegments + report.recoveredSessions > 0) {
                 Log.i(TAG, "startup recovery: $report")
             }
+
+            // Trash expires on app open rather than on a timer: a note deleted
+            // a month ago and never asked about is safe to erase, but only on
+            // the user's own schedule.
+            val purged = container.sessionRepository.purgeExpiredTrash()
+            if (purged > 0) Log.i(TAG, "purged $purged expired note(s) from trash")
         }
     }
 

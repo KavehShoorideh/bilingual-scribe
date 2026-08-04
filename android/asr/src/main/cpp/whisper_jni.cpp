@@ -71,8 +71,10 @@ Java_dev_bscribe_asr_WhisperNative_nativeInitContext(
         cparams.dtw_token_timestamps = true;
         cparams.dtw_aheads_preset =
                 static_cast<whisper_alignment_heads_preset>(dtwPreset);
-        // 0 lets whisper size the DTW scratch buffer itself.
-        cparams.dtw_mem_size = 0;
+        // Leave dtw_mem_size at whisper's default (128 MB). It is passed
+        // straight to ggml_init as the arena size, so a smaller value — 0
+        // especially — makes every DTW tensor allocation fail an assert and
+        // abort the process mid-decode.
     }
 
     whisper_context *ctx = whisper_init_from_file_with_params(path.c_str(), cparams);

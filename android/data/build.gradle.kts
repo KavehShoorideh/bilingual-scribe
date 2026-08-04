@@ -40,6 +40,13 @@ ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
 
+// The schema JSON is produced by KSP but consumed from unit-test assets, and
+// nothing declares that ordering — so on a clean build the asset merge can run
+// first and the newest schema silently goes missing, failing migration tests
+// with FileNotFoundException.
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("UnitTestAssets") }
+    .configureEach { dependsOn("kspDebugKotlin") }
+
 dependencies {
     api(project(":core"))
 

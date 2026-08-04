@@ -26,10 +26,12 @@ import dev.bscribe.core.asr.NoopLiveTranscriber
 import dev.bscribe.core.audio.PcmLevels
 import dev.bscribe.core.audio.WavFileWriter
 import dev.bscribe.core.audio.WavSpec
+import dev.bscribe.app.util.formatClock
 import dev.bscribe.core.model.SessionState
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
@@ -63,6 +65,9 @@ class RecordingService : Service() {
 
     private var capture: CaptureRun? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    /** The in-flight final pass, so Cancel has something to cancel. */
+    @Volatile private var transcribeJob: Job? = null
 
     /** One pause/resume segment currently on disk. */
     private inner class CaptureRun(
@@ -159,6 +164,13 @@ class RecordingService : Service() {
                 val i = intent
                 scope.launch { commandMutex.withLock { handleTranscribe(i) } }
             }
+            // Deliberately not behind the command mutex: the mutex is held for
+            // the duration of a pass, so a cancel routed through it could only
+            // run once the thing it is cancelling had already finished.
+            ACTION_CANCEL_TRANSCRIBE -> {
+                Log.i(TAG, "cancelling transcription")
+                transcribeJob?.cancel()
+            }
             else -> Log.w(TAG, "unknown action ${intent?.action}")
         }
         return START_NOT_STICKY
@@ -240,17 +252,24 @@ class RecordingService : Service() {
         // mid-pass and a 10-minute note takes far longer than it should.
         acquireWakeLock()
         try {
-            val outcome = runner.run(sessionId) { progress ->
-                notify(
-                    buildNotification(
-                        Phase.Transcribing(progress.segment, progress.totalSegments),
-                    ),
-                )
+            // Tracked separately so Cancel can reach it — the command mutex is
+            // deliberately not held here, or a cancel could never be processed.
+            val job = scope.launch {
+                val outcome = runner.run(sessionId) { progress ->
+                    notify(
+                        buildNotification(
+                            Phase.Transcribing(progress.doneMs, progress.totalMs),
+                        ),
+                    )
+                }
+                if (outcome is TranscribeOutcome.NoModel) {
+                    Log.i(TAG, "skipped transcription: ${outcome.wanted} is not downloaded")
+                }
             }
-            if (outcome is TranscribeOutcome.NoModel) {
-                Log.i(TAG, "skipped transcription: ${outcome.wanted} is not downloaded")
-            }
+            transcribeJob = job
+            job.join()
         } finally {
+            transcribeJob = null
             releaseWakeLock()
         }
     }
@@ -296,7 +315,10 @@ class RecordingService : Service() {
     private sealed interface Phase {
         data object Recording : Phase
         data object Paused : Phase
-        data class Transcribing(val segment: Int, val total: Int) : Phase
+        data class Transcribing(val doneMs: Long, val totalMs: Long) : Phase {
+            val percent: Int
+                get() = if (totalMs <= 0) 0 else ((doneMs * 100) / totalMs).toInt()
+        }
     }
 
     private fun buildNotification(phase: Phase): Notification {
@@ -341,17 +363,22 @@ class RecordingService : Service() {
             is Phase.Transcribing -> builder
                 .setContentTitle("Transcribing…")
                 .apply {
-                    if (phase.total > 1) {
-                        setContentText("Segment ${phase.segment} of ${phase.total}")
-                        setProgress(phase.total, phase.segment, false)
+                    if (phase.totalMs > 0) {
+                        // Progress in audio time, not segments: a one-segment
+                        // recording otherwise shows a spinner that never moves,
+                        // which is indistinguishable from a hang.
+                        setContentText(
+                            "${formatClock(phase.doneMs)} of ${formatClock(phase.totalMs)}",
+                        )
+                        setProgress(100, phase.percent, false)
                     } else {
-                        // Segment count is unknown until the pass starts, and
-                        // a 1-of-1 progress bar reads as broken.
                         setProgress(0, 0, true)
                     }
                 }
-                // Deliberately no Stop action: killing a pass midway leaves a
-                // partial transcript for no benefit. The audio is already safe.
+                // Transcription can take minutes; leaving no way out but a
+                // force-stop is worse than a partial transcript. Words are
+                // saved per segment, so cancelling keeps what finished.
+                .addAction(action("Cancel", ACTION_CANCEL_TRANSCRIBE))
                 .build()
         }
     }
@@ -388,6 +415,7 @@ class RecordingService : Service() {
 
         /** Re-run the final pass over an existing session. */
         const val ACTION_TRANSCRIBE = "dev.bscribe.app.action.TRANSCRIBE"
+        const val ACTION_CANCEL_TRANSCRIBE = "dev.bscribe.app.action.CANCEL_TRANSCRIBE"
         const val EXTRA_SESSION_ID = "sessionId"
 
         fun intent(context: android.content.Context, action: String): Intent =

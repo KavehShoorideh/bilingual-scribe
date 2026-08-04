@@ -12,10 +12,19 @@ import dev.bscribe.data.repo.ModelRepository
 import dev.bscribe.data.repo.SessionRepository
 import dev.bscribe.data.repo.SettingsRepository
 import dev.bscribe.data.repo.TranscribeLanguages
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 
-/** Progress for the foreground notification while the final pass runs. */
-data class TranscribeProgress(val segment: Int, val totalSegments: Int)
+/**
+ * Progress for the foreground notification, measured in audio time rather
+ * than segments. A single-segment recording only ever produced one segment
+ * update, which for a long note is indistinguishable from a hang.
+ */
+data class TranscribeProgress(val doneMs: Long, val totalMs: Long) {
+    val percent: Int get() = if (totalMs <= 0) 0 else ((doneMs * 100) / totalMs).toInt()
+}
 
 sealed interface TranscribeOutcome {
     data object Done : TranscribeOutcome
@@ -65,26 +74,51 @@ class TranscriptionRunner(
             val modelId = ModelFiles.modelId(modelFile)
 
             val segments = repo.recordingsOf(sessionId).filter { it.durationMs > 0 }
-            segments.forEachIndexed { index, recording ->
-                onProgress(TranscribeProgress(index + 1, segments.size))
+            val totalMs = segments.sumOf { it.durationMs }
+            var completedMs = 0L
+
+            val startedAt = System.currentTimeMillis()
+            segments.forEach { recording ->
                 val wav = repo.resolveWav(recording)
                 if (!wav.isFile) {
                     Log.w(TAG, "segment ${recording.id} has no audio file; skipping")
-                    return@forEachIndexed
+                    completedMs += recording.durationMs
+                    return@forEach
                 }
+                val base = completedMs
                 // Read 30s at a time rather than the whole segment: sessions
                 // can run to hours, and holding one entirely in memory as
                 // PCM16 would OOM before whisper saw any of it.
                 val words = engine.transcribeWindowed(
                     durationMs = recording.durationMs,
                     params = DecodeParams(nThreads = threads),
+                    onWindow = { doneMs, _ ->
+                        onProgress(TranscribeProgress(base + doneMs, totalMs))
+                    },
                 ) { startMs, endMs -> WavReader.readRange(wav, startMs, endMs) }
+                // Saved per segment, so cancelling or crashing mid-session
+                // keeps whatever was already transcribed.
                 repo.saveTranscript(recording.id, words, modelId)
+                completedMs += recording.durationMs
             }
+            val wallMs = System.currentTimeMillis() - startedAt
+            val rtf = "%.2f".format(wallMs.toDouble() / totalMs.coerceAtLeast(1))
+            Log.i(
+                TAG,
+                "transcribed ${totalMs}ms of audio in ${wallMs}ms (RTF $rtf), " +
+                    "model=${spec.label}, langs=${plan.codes}, threads=$threads",
+            )
 
             repo.updateLanguageHint(sessionId)
             repo.setState(sessionId, SessionState.TRANSCRIBED)
             TranscribeOutcome.Done
+        } catch (e: CancellationException) {
+            // Whatever finished is already saved; park the session so it can
+            // be resumed rather than leaving it stuck in TRANSCRIBING.
+            withContext(NonCancellable) {
+                runCatching { repo.setState(sessionId, SessionState.STOPPED) }
+            }
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "transcription failed for $sessionId", e)
             // Back to STOPPED, not stuck in TRANSCRIBING: the audio is intact

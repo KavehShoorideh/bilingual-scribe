@@ -37,8 +37,18 @@ interface SessionDao {
     suspend fun markReviewed(id: String, reviewedAt: Long, state: SessionState = SessionState.REVIEWED)
 
     @Transaction
-    @Query("SELECT * FROM sessions ORDER BY createdAt DESC")
+    @Query("SELECT * FROM sessions WHERE deletedAt IS NULL ORDER BY createdAt DESC")
     fun observeAllWithRecordings(): Flow<List<SessionWithRecordings>>
+
+    @Transaction
+    @Query("SELECT * FROM sessions WHERE deletedAt IS NOT NULL ORDER BY deletedAt DESC")
+    fun observeTrashWithRecordings(): Flow<List<SessionWithRecordings>>
+
+    @Query("UPDATE sessions SET deletedAt = :deletedAt WHERE id = :id")
+    suspend fun setDeletedAt(id: String, deletedAt: Long?)
+
+    @Query("SELECT * FROM sessions WHERE deletedAt IS NOT NULL AND deletedAt < :before")
+    suspend fun trashedBefore(before: Long): List<SessionEntity>
 
     @Transaction
     @Query("SELECT * FROM sessions WHERE id = :id")

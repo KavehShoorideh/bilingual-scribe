@@ -104,4 +104,51 @@ class MigrationTest {
         // runMigrationsAndValidate throws if the resulting schema does not
         // match the exported v2 JSON, so reaching here is the assertion.
     }
+
+    @Test
+    fun `v1 through v3 keeps notes and leaves them out of the trash`() {
+        helper.createDatabase(dbName, 1).use { db ->
+            db.execSQL(
+                "INSERT INTO sessions (id, title, createdAt, state, languageHint, reviewedAt) " +
+                    "VALUES ('s1', 'Old note', 1000, 'STOPPED', 'en', NULL)",
+            )
+        }
+
+        val db = helper.runMigrationsAndValidate(
+            dbName, 3, true,
+            ScribeDatabase.MIGRATION_1_2, ScribeDatabase.MIGRATION_2_3,
+        )
+
+        db.query("SELECT title, deletedAt FROM sessions").use { c ->
+            assertTrue(c.moveToFirst(), "the note must survive two migrations")
+            assertEquals("Old note", c.getString(0))
+            // Existing notes are live, not trashed — a migration must never
+            // sweep someone's recordings into a bin they didn't ask for.
+            assertTrue(c.isNull(1), "deletedAt must default to NULL")
+        }
+    }
+
+    @Test
+    fun `v3 round-trips a trashed and restored note`() {
+        helper.createDatabase(dbName, 1).close()
+        val db = helper.runMigrationsAndValidate(
+            dbName, 3, true,
+            ScribeDatabase.MIGRATION_1_2, ScribeDatabase.MIGRATION_2_3,
+        )
+
+        db.execSQL(
+            "INSERT INTO sessions (id, title, createdAt, state, languageHint, " +
+                "reviewedAt, deletedAt) VALUES ('s1', NULL, 1, 'STOPPED', NULL, NULL, 9999)",
+        )
+        db.query("SELECT deletedAt FROM sessions WHERE id = 's1'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertEquals(9999L, c.getLong(0))
+        }
+
+        db.execSQL("UPDATE sessions SET deletedAt = NULL WHERE id = 's1'")
+        db.query("SELECT deletedAt FROM sessions WHERE id = 's1'").use { c ->
+            assertTrue(c.moveToFirst())
+            assertTrue(c.isNull(0), "restoring must clear deletedAt")
+        }
+    }
 }
