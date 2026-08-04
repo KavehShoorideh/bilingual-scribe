@@ -78,3 +78,13 @@ Full toolchain setup, adb pairing, and the update flow:
 - Phone: Android 13+ (developed against /e/OS on Fairphone 4), arm64. No
   Google services required.
 - Trainer: Python 3.11+, PyTorch (MPS or CUDA). See `trainer/README.md` (M2).
+
+## License
+
+[GPL-3.0](LICENSE). Derivatives must stay open — fitting for something that
+handles your voice: anyone shipping a modified build has to publish what they
+changed.
+
+Note that the app's own recordings, transcripts, and exported training data
+are **yours** and are not covered by this license; nothing leaves the device
+unless you export it.
