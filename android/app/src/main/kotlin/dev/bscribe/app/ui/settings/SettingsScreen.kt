@@ -1,5 +1,6 @@
 package dev.bscribe.app.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +25,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -39,16 +41,19 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.bscribe.app.BuildConfig
 import dev.bscribe.data.repo.LiveTranscriptMode
+import dev.bscribe.data.repo.TranscribeLanguages
 import dev.bscribe.data.repo.UpdateState
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onOpenModels: () -> Unit = {}) {
     val context = LocalContext.current
     val vm: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(context))
     val mode by vm.liveMode.collectAsState()
     val update by vm.updateState.collectAsState()
+    val languages by vm.languages.collectAsState()
+    val autoTranscribe by vm.autoTranscribe.collectAsState()
 
     val snackbars = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -73,6 +78,84 @@ fun SettingsScreen(onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
+            Text("Transcription", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Runs after you stop recording. Everything happens on this phone.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenModels)
+                    .padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Speech models", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Download or switch the model used for transcription",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Transcribe automatically", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "Start the pass as soon as you stop recording",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(checked = autoTranscribe, onCheckedChange = vm::setAutoTranscribe)
+            }
+
+            Text("Languages", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "Both decodes every passage twice and keeps whichever reads better — " +
+                    "best for code-switching, about twice the work. Picking one language " +
+                    "halves the time and heat.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TranscribeLanguages.entries.forEach { candidate ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = languages == candidate,
+                            onClick = { vm.setLanguages(candidate) },
+                        )
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = languages == candidate,
+                        onClick = { vm.setLanguages(candidate) },
+                    )
+                    Text(
+                        when (candidate) {
+                            TranscribeLanguages.BOTH -> "English and Farsi"
+                            TranscribeLanguages.ENGLISH -> "English only"
+                            TranscribeLanguages.FARSI -> "Farsi only"
+                        },
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
             Text("Live transcript while recording", style = MaterialTheme.typography.titleMedium)
             Text(
                 "Applies once live transcription lands (milestone M1b). " +

@@ -2,7 +2,9 @@ package dev.bscribe.app
 
 import android.content.Context
 import dev.bscribe.app.record.RecorderStateHolder
+import dev.bscribe.app.record.TranscriptionRunner
 import dev.bscribe.data.db.ScribeDatabase
+import dev.bscribe.data.repo.ModelRepository
 import dev.bscribe.data.repo.SessionRepository
 import dev.bscribe.data.repo.SettingsRepository
 import dev.bscribe.data.repo.UpdateRepository
@@ -31,6 +33,14 @@ class AppContainer(context: Context) {
             cacheDir = context.cacheDir,
             currentVersionCode = BuildConfig.VERSION_CODE,
         )
+    }
+
+    val modelRepository: ModelRepository by lazy {
+        ModelRepository(context.filesDir).also { it.refresh() }
+    }
+
+    val transcriptionRunner: TranscriptionRunner by lazy {
+        TranscriptionRunner(sessionRepository, settingsRepository, modelRepository)
     }
 
     /** Single source of truth the record screen and the service both observe. */

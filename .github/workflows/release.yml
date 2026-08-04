@@ -17,9 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # versionCode is derived from the commit count, so the full history
-          # must be present or every release would report versionCode 1.
+          # versionCode is derived from the commit count and versionName from
+          # the latest tag, so the full history must be present.
           fetch-depth: 0
+          # :asr compiles whisper.cpp from third_party/.
+          submodules: recursive
 
       - uses: actions/setup-java@v4
         with:
@@ -27,6 +29,9 @@ jobs:
           java-version: "17"
 
       - uses: android-actions/setup-android@v3
+
+      - name: Install NDK and CMake for the native build
+        run: sdkmanager --install "ndk;28.2.13676358" "cmake;3.31.6"
 
       - uses: gradle/actions/setup-gradle@v4
 

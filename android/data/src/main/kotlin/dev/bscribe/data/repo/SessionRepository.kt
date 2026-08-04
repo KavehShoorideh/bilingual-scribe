@@ -1,5 +1,8 @@
 package dev.bscribe.data.repo
 
+import dev.bscribe.core.asr.Lang
+import dev.bscribe.core.asr.ScriptLang
+import dev.bscribe.core.asr.Word
 import dev.bscribe.core.audio.WavRepair
 import dev.bscribe.core.audio.WavSpec
 import dev.bscribe.core.model.SessionState
@@ -7,6 +10,7 @@ import dev.bscribe.data.db.RecordingEntity
 import dev.bscribe.data.db.ScribeDatabase
 import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
+import dev.bscribe.data.db.TranscriptWordEntity
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.flow.Flow
@@ -25,8 +29,60 @@ class SessionRepository(
 ) {
     private val sessions get() = db.sessionDao()
     private val recordings get() = db.recordingDao()
+    private val transcripts get() = db.transcriptDao()
 
     fun observeSessions(): Flow<List<SessionWithRecordings>> = sessions.observeAllWithRecordings()
+
+    fun observeTranscript(recordingId: String): Flow<List<TranscriptWordEntity>> =
+        transcripts.observeByRecording(recordingId)
+
+    suspend fun transcriptOf(recordingId: String): List<TranscriptWordEntity> =
+        transcripts.byRecording(recordingId)
+
+    /**
+     * Replaces a recording's transcript.
+     *
+     * Delete-then-insert rather than append, so re-running the pass — after a
+     * crash, or with a better model — is idempotent instead of doubling every
+     * word.
+     */
+    suspend fun saveTranscript(recordingId: String, words: List<Word>, modelId: String) {
+        transcripts.deleteByRecording(recordingId)
+        if (words.isEmpty()) return
+        transcripts.insertAll(
+            words.mapIndexed { idx, w ->
+                TranscriptWordEntity(
+                    recordingId = recordingId,
+                    wordIdx = idx,
+                    text = w.text,
+                    t0Ms = w.t0Ms,
+                    t1Ms = w.t1Ms,
+                    prob = w.prob,
+                    segmentIdx = w.segmentIdx,
+                    modelId = modelId,
+                    lang = w.lang.code,
+                )
+            },
+        )
+    }
+
+    /**
+     * Records what languages actually turned up in a session, for the export
+     * bundle's `language_hint` (docs/dataset-format.md).
+     */
+    suspend fun updateLanguageHint(sessionId: String) {
+        val langs = recordingsOf(sessionId)
+            .flatMap { transcriptOf(it.id) }
+            .map {
+                when (it.lang) {
+                    "en" -> Lang.EN
+                    "fa" -> Lang.FA
+                    else -> Lang.UND
+                }
+            }
+        val current = sessions.byId(sessionId) ?: return
+        sessions.update(current.copy(languageHint = ScriptLang.ofSession(langs)))
+    }
 
     fun observeSession(id: String): Flow<SessionWithRecordings?> = sessions.observeWithRecordings(id)
 

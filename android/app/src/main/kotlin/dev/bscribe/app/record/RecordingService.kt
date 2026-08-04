@@ -32,6 +32,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -55,6 +56,7 @@ class RecordingService : Service() {
     private val container by lazy { applicationContext.appContainer }
     private val repo by lazy { container.sessionRepository }
     private val state by lazy { container.recorderState }
+    private val runner by lazy { container.transcriptionRunner }
 
     /** M0: a no-op; M1b swaps in the whisper chunked engine. */
     private val liveTranscriber: LiveTranscriber = NoopLiveTranscriber()
@@ -138,7 +140,7 @@ class RecordingService : Service() {
                 // Must enter the foreground promptly with the microphone type.
                 startForeground(
                     NOTIFICATION_ID,
-                    buildNotification(paused = false),
+                    buildNotification(Phase.Recording),
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
                 )
                 scope.launch { commandMutex.withLock { handleStart() } }
@@ -146,6 +148,17 @@ class RecordingService : Service() {
             ACTION_PAUSE -> scope.launch { commandMutex.withLock { handlePause() } }
             ACTION_RESUME -> scope.launch { commandMutex.withLock { handleResume() } }
             ACTION_STOP -> scope.launch { commandMutex.withLock { handleStop() } }
+            ACTION_TRANSCRIBE -> {
+                // Enter the foreground immediately: a service started from the
+                // background has a few seconds to do so or the system kills it.
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildNotification(Phase.Transcribing(0, 0)),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                )
+                val i = intent
+                scope.launch { commandMutex.withLock { handleTranscribe(i) } }
+            }
             else -> Log.w(TAG, "unknown action ${intent?.action}")
         }
         return START_NOT_STICKY
@@ -178,7 +191,7 @@ class RecordingService : Service() {
         repo.setState(sessionId, SessionState.PAUSED)
         state.onPaused()
         releaseWakeLock()
-        notify(buildNotification(paused = true))
+        notify(buildNotification(Phase.Paused))
     }
 
     private suspend fun handleResume() {
@@ -188,7 +201,7 @@ class RecordingService : Service() {
         val (recording, file) = repo.startSegment(sessionId)
         beginCapture(recording.id, file, baseElapsedMs = previous)
         state.onRecording()
-        notify(buildNotification(paused = false))
+        notify(buildNotification(Phase.Recording))
     }
 
     private suspend fun handleStop() {
@@ -202,9 +215,55 @@ class RecordingService : Service() {
         }
         if (sessionId != null) {
             repo.setState(sessionId, SessionState.STOPPED)
-            // M1a hooks the final transcription pass here, keeping the service
-            // foregrounded with a "Transcribing…" notification until done.
+            releaseWakeLock()
+            if (container.settingsRepository.autoTranscribe.first()) {
+                runTranscription(sessionId)
+            }
         }
+        stopSelfCleanly()
+    }
+
+    /**
+     * Runs the accurate pass with the service still in the foreground.
+     *
+     * The microphone is already released by this point, so the service
+     * re-declares itself as dataSync only — holding a microphone foreground
+     * type without recording would show a mic indicator for no reason.
+     */
+    private suspend fun runTranscription(sessionId: String) {
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(Phase.Transcribing(0, 0)),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+        // Transcription is CPU-bound and long; without this the CPU can sleep
+        // mid-pass and a 10-minute note takes far longer than it should.
+        acquireWakeLock()
+        try {
+            val outcome = runner.run(sessionId) { progress ->
+                notify(
+                    buildNotification(
+                        Phase.Transcribing(progress.segment, progress.totalSegments),
+                    ),
+                )
+            }
+            if (outcome is TranscribeOutcome.NoModel) {
+                Log.i(TAG, "skipped transcription: ${outcome.wanted} is not downloaded")
+            }
+        } finally {
+            releaseWakeLock()
+        }
+    }
+
+    private suspend fun handleTranscribe(intent: Intent) {
+        val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
+        if (capture != null) {
+            // Never contend with live capture for CPU or for the foreground
+            // service type; the audio comes first.
+            Log.w(TAG, "refusing to transcribe while recording")
+            return
+        }
+        runTranscription(sessionId)
         stopSelfCleanly()
     }
 
@@ -233,10 +292,17 @@ class RecordingService : Service() {
 
     // ---- notification ----
 
-    private fun buildNotification(paused: Boolean): Notification {
+    /** What the service is doing, which determines the notification it shows. */
+    private sealed interface Phase {
+        data object Recording : Phase
+        data object Paused : Phase
+        data class Transcribing(val segment: Int, val total: Int) : Phase
+    }
+
+    private fun buildNotification(phase: Phase): Notification {
         val channel = NotificationChannel(
             CHANNEL_ID, "Recording", NotificationManager.IMPORTANCE_LOW,
-        ).apply { description = "Shown while Bilingual Scribe is capturing audio" }
+        ).apply { description = "Shown while Bilingual Scribe is capturing or transcribing" }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
 
         fun action(name: String, action: String): NotificationCompat.Action {
@@ -253,17 +319,41 @@ class RecordingService : Service() {
             PendingIntent.FLAG_IMMUTABLE,
         )
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_mic)
-            .setContentTitle(if (paused) "Paused" else "Recording")
             .setContentText("Bilingual Scribe")
             .setOngoing(true)
             .setContentIntent(contentIntent)
-            .addAction(
-                if (paused) action("Resume", ACTION_RESUME) else action("Pause", ACTION_PAUSE),
-            )
-            .addAction(action("Stop", ACTION_STOP))
-            .build()
+
+        return when (phase) {
+            is Phase.Recording -> builder
+                .setContentTitle("Recording")
+                .addAction(action("Pause", ACTION_PAUSE))
+                .addAction(action("Stop", ACTION_STOP))
+                .build()
+
+            is Phase.Paused -> builder
+                .setContentTitle("Paused")
+                .addAction(action("Resume", ACTION_RESUME))
+                .addAction(action("Stop", ACTION_STOP))
+                .build()
+
+            is Phase.Transcribing -> builder
+                .setContentTitle("Transcribing…")
+                .apply {
+                    if (phase.total > 1) {
+                        setContentText("Segment ${phase.segment} of ${phase.total}")
+                        setProgress(phase.total, phase.segment, false)
+                    } else {
+                        // Segment count is unknown until the pass starts, and
+                        // a 1-of-1 progress bar reads as broken.
+                        setProgress(0, 0, true)
+                    }
+                }
+                // Deliberately no Stop action: killing a pass midway leaves a
+                // partial transcript for no benefit. The audio is already safe.
+                .build()
+        }
     }
 
     private fun notify(notification: Notification) {
@@ -296,7 +386,14 @@ class RecordingService : Service() {
         const val ACTION_RESUME = "dev.bscribe.app.action.RESUME"
         const val ACTION_STOP = "dev.bscribe.app.action.STOP"
 
+        /** Re-run the final pass over an existing session. */
+        const val ACTION_TRANSCRIBE = "dev.bscribe.app.action.TRANSCRIBE"
+        const val EXTRA_SESSION_ID = "sessionId"
+
         fun intent(context: android.content.Context, action: String): Intent =
             Intent(context, RecordingService::class.java).setAction(action)
+
+        fun transcribeIntent(context: android.content.Context, sessionId: String): Intent =
+            intent(context, ACTION_TRANSCRIBE).putExtra(EXTRA_SESSION_ID, sessionId)
     }
 }

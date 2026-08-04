@@ -1,12 +1,17 @@
 package dev.bscribe.app.ui.detail
 
 import android.content.Context
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -18,6 +23,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
@@ -34,9 +40,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
@@ -48,17 +58,28 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import dev.bscribe.app.appContainer
+import dev.bscribe.app.record.RecordingService
 import dev.bscribe.app.util.formatClock
 import dev.bscribe.app.util.formatTimestamp
+import dev.bscribe.core.model.SessionState
 import dev.bscribe.data.db.SessionWithRecordings
+import dev.bscribe.data.db.TranscriptWordEntity
 import dev.bscribe.data.repo.SessionRepository
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+/** One recording's worth of transcript. */
+data class TranscriptGroup(val recordingId: String, val words: List<TranscriptWordEntity>)
+
+@OptIn(ExperimentalCoroutinesApi::class)
 class SessionDetailViewModel(
     private val repo: SessionRepository,
     private val sessionId: String,
@@ -76,6 +97,31 @@ class SessionDetailViewModel(
 
     private var queued = false
 
+    /**
+     * recordingId → index in the ExoPlayer playlist.
+     *
+     * Not the same as [dev.bscribe.data.db.RecordingEntity.idx]: the playlist
+     * skips zero-length segments, so a session with an empty segment would
+     * otherwise seek to the wrong audio when a word is tapped.
+     */
+    private var playlistIndex: Map<String, Int> = emptyMap()
+
+    /** Transcript words per recording, in playback order. */
+    val transcript: StateFlow<List<TranscriptGroup>> =
+        repo.observeSession(sessionId)
+            .flatMapLatest { s ->
+                val recs = s?.recordings.orEmpty().sortedBy { it.idx }
+                if (recs.isEmpty()) {
+                    flowOf(emptyList())
+                } else {
+                    combine(recs.map { repo.observeTranscript(it.id) }) { arrays ->
+                        recs.mapIndexed { i, rec -> TranscriptGroup(rec.id, arrays[i]) }
+                            .filter { it.words.isNotEmpty() }
+                    }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     init {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -84,21 +130,40 @@ class SessionDetailViewModel(
         })
     }
 
+    private fun ensureQueued(): Boolean {
+        val current = session.value ?: return false
+        if (queued) return true
+        val playable = current.recordings.filter { it.durationMs > 0 }.sortedBy { it.idx }
+        if (playable.isEmpty()) return false
+        player.setMediaItems(playable.map { MediaItem.fromUri(repo.resolveWav(it).toUri()) })
+        player.prepare()
+        playlistIndex = playable.mapIndexed { i, r -> r.id to i }.toMap()
+        queued = true
+        return true
+    }
+
     fun togglePlayback() {
-        val current = session.value ?: return
-        if (!queued) {
-            val items = current.recordings
-                .filter { it.durationMs > 0 }
-                .map { MediaItem.fromUri(repo.resolveWav(it).toUri()) }
-            if (items.isEmpty()) return
-            player.setMediaItems(items)
-            player.prepare()
-            queued = true
-        }
+        if (!ensureQueued()) return
         if (player.isPlaying) player.pause() else {
             if (player.playbackState == Player.STATE_ENDED) player.seekTo(0, 0)
             player.play()
         }
+    }
+
+    /** Plays from the moment a tapped word was spoken. */
+    fun playWord(recordingId: String, t0Ms: Long) {
+        if (!ensureQueued()) return
+        val index = playlistIndex[recordingId] ?: return
+        // Nudge back slightly: word onsets land a touch late, and starting
+        // mid-syllable makes a correct timestamp feel wrong.
+        player.seekTo(index, (t0Ms - PLAY_LEAD_IN_MS).coerceAtLeast(0))
+        player.play()
+    }
+
+    fun retranscribe(context: Context) {
+        context.startForegroundService(
+            RecordingService.transcribeIntent(context, sessionId),
+        )
     }
 
     fun rename(title: String) {
@@ -123,6 +188,12 @@ class SessionDetailViewModel(
                 SessionDetailViewModel(context.appContainer.sessionRepository, sessionId, context)
             }
         }
+
+        /**
+         * Word onsets sit a little late even with DTW alignment, and starting
+         * playback mid-syllable makes an accurate timestamp feel broken.
+         */
+        private const val PLAY_LEAD_IN_MS = 120L
     }
 }
 
@@ -134,6 +205,7 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
         viewModel(factory = SessionDetailViewModel.factory(context, sessionId))
     val sessionData by viewModel.session.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
+    val transcript by viewModel.transcript.collectAsState()
 
     var showRename by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
@@ -186,17 +258,12 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
 
             Spacer(Modifier.padding(8.dp))
 
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Transcript", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "On-device transcription lands in the next milestone. " +
-                            "Your audio is safe and will be transcribable then.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            TranscriptCard(
+                groups = transcript,
+                state = session?.state,
+                onWordTap = viewModel::playWord,
+                onTranscribe = { viewModel.retranscribe(context) },
+            )
         }
     }
 
@@ -240,3 +307,91 @@ fun SessionDetailScreen(sessionId: String, onBack: () -> Unit) {
         )
     }
 }
+
+/**
+ * Word chips from the final pass.
+ *
+ * Tapping a chip plays from that word — the reason M1a uses DTW alignment
+ * rather than whisper's heuristic timestamps, which jitter enough to land on
+ * a neighbouring word.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TranscriptCard(
+    groups: List<TranscriptGroup>,
+    state: SessionState?,
+    onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
+    onTranscribe: () -> Unit,
+) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Transcript",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (state == SessionState.TRANSCRIBING) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    TextButton(onClick = onTranscribe) {
+                        Text(if (groups.isEmpty()) "Transcribe" else "Redo")
+                    }
+                }
+            }
+
+            when {
+                state == SessionState.TRANSCRIBING -> Text(
+                    "Working through the audio. You can leave this screen.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                groups.isEmpty() -> Text(
+                    "Not transcribed yet. Download a model in Settings, then tap " +
+                        "Transcribe. Your audio is safe either way.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                else -> groups.forEach { group ->
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        group.words.forEach { word ->
+                            WordChip(word) { onWordTap(group.recordingId, word.t0Ms) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WordChip(word: TranscriptWordEntity, onTap: () -> Unit) {
+    // Farsi is right-to-left; rendering it LTR mangles word order visually
+    // even when the underlying text is correct.
+    val direction = if (word.lang == "fa") LayoutDirection.Rtl else LayoutDirection.Ltr
+    // Low-confidence words are muted rather than hidden — knowing whisper was
+    // unsure is more useful than a confident-looking wrong word.
+    val alpha = if (word.prob < LOW_CONFIDENCE) 0.45f else 1f
+
+    CompositionLocalProvider(LocalLayoutDirection provides direction) {
+        Text(
+            text = word.text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+            modifier = Modifier
+                .clip(MaterialTheme.shapes.small)
+                .clickable(onClick = onTap)
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+        )
+    }
+}
+
+private const val LOW_CONFIDENCE = 0.55f

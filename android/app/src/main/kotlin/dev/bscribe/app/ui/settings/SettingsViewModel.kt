@@ -11,6 +11,7 @@ import dev.bscribe.app.record.RecorderStatus
 import dev.bscribe.app.update.ApkInstaller
 import dev.bscribe.data.repo.LiveTranscriptMode
 import dev.bscribe.data.repo.SettingsRepository
+import dev.bscribe.data.repo.TranscribeLanguages
 import dev.bscribe.data.repo.UpdateRepository
 import dev.bscribe.data.repo.UpdateState
 import kotlinx.coroutines.flow.SharingStarted
@@ -28,10 +29,24 @@ class SettingsViewModel(
     val liveMode: StateFlow<LiveTranscriptMode> = settings.liveTranscriptMode
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LiveTranscriptMode.FULL)
 
+    val languages: StateFlow<TranscribeLanguages> = settings.transcribeLanguages
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), TranscribeLanguages.BOTH)
+
+    val autoTranscribe: StateFlow<Boolean> = settings.autoTranscribe
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
     val updateState: StateFlow<UpdateState> = updates.state
 
     fun setLiveMode(mode: LiveTranscriptMode) {
         viewModelScope.launch { settings.setLiveTranscriptMode(mode) }
+    }
+
+    fun setLanguages(value: TranscribeLanguages) {
+        viewModelScope.launch { settings.setTranscribeLanguages(value) }
+    }
+
+    fun setAutoTranscribe(value: Boolean) {
+        viewModelScope.launch { settings.setAutoTranscribe(value) }
     }
 
     fun checkForUpdate() {

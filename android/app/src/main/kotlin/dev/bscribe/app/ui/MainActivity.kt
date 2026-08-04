@@ -9,6 +9,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import dev.bscribe.app.ui.detail.SessionDetailScreen
+import dev.bscribe.app.ui.models.ModelsScreen
 import dev.bscribe.app.ui.record.RecordScreen
 import dev.bscribe.app.ui.sessions.SessionListScreen
 import dev.bscribe.app.ui.settings.SettingsScreen
@@ -18,6 +19,7 @@ object Routes {
     const val SESSIONS = "sessions"
     const val RECORD = "record"
     const val SETTINGS = "settings"
+    const val MODELS = "models"
     const val SESSION_DETAIL = "session/{sessionId}"
     fun sessionDetail(id: String) = "session/$id"
 }
@@ -59,7 +61,13 @@ private fun ScribeNavHost(nav: NavHostController) {
             )
         }
         composable(Routes.SETTINGS) {
-            SettingsScreen(onBack = { nav.popBackStack() })
+            SettingsScreen(
+                onBack = { nav.popBackStack() },
+                onOpenModels = { nav.navigate(Routes.MODELS) },
+            )
+        }
+        composable(Routes.MODELS) {
+            ModelsScreen(onBack = { nav.popBackStack() })
         }
     }
 }

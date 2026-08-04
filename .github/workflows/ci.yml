@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # :asr compiles whisper.cpp from third_party/; without this the
+          # CMake build fails on an empty directory.
+          submodules: recursive
 
       - uses: actions/setup-java@v4
         with:
@@ -22,6 +26,9 @@ jobs:
           java-version: "17"
 
       - uses: android-actions/setup-android@v3
+
+      - name: Install NDK and CMake for the native build
+        run: sdkmanager --install "ndk;28.2.13676358" "cmake;3.31.6"
 
       - uses: gradle/actions/setup-gradle@v4
 
