@@ -105,6 +105,7 @@ class RecordingService : Service() {
             try {
                 record.startRecording()
                 val buf = ShortArray(spec.sampleRate * 320 / 1000) // 320 ms
+                val meterBlock = spec.sampleRate * 80 / 1000 // 80 ms per level
                 while (running) {
                     val n = record.read(buf, 0, buf.size)
                     if (n > 0) {
@@ -112,10 +113,24 @@ class RecordingService : Service() {
                         writer.append(buf, 0, n)
                         // Live engine taps a copy, never blocks the loop.
                         liveTranscriber.feed(buf, 0, n)
-                        state.onProgress(
-                            elapsedMs = baseElapsedMs + writer.durationMs,
-                            vuMeter = PcmLevels.dbToMeter(PcmLevels.rmsDb(buf, 0, n)),
-                        )
+
+                        // One level per buffer meant a meter updating ~3 times
+                        // a second, which reads as stuttering rather than
+                        // responsive. Levels are computed over sub-blocks so
+                        // the meter moves at ~12 Hz; the disk write cadence is
+                        // untouched.
+                        val elapsed = baseElapsedMs + writer.durationMs
+                        var off = 0
+                        while (off < n) {
+                            val len = minOf(meterBlock, n - off)
+                            state.onProgress(
+                                elapsedMs = elapsed,
+                                vuMeter = PcmLevels.dbToMeter(
+                                    PcmLevels.rmsDb(buf, off, len),
+                                ),
+                            )
+                            off += len
+                        }
                     } else if (n < 0) {
                         Log.e(TAG, "AudioRecord.read failed: $n")
                         break
@@ -237,6 +252,12 @@ class RecordingService : Service() {
         if (sessionId != null) {
             repo.setState(sessionId, SessionState.STOPPED)
             releaseWakeLock()
+            // Hand the UI back *before* the pass starts. Transcription can run
+            // for minutes; leaving the recorder in STOPPING for its duration
+            // stranded the user on the record screen with a frozen timer and
+            // no sign anything was happening. Progress lives in the
+            // notification and on the session screen instead.
+            state.onIdle()
             if (container.settingsRepository.autoTranscribe.first()) {
                 runTranscription(sessionId)
             }

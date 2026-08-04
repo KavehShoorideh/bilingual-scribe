@@ -51,6 +51,10 @@ class RecorderStateHolder {
     }
 
     fun onStopping() {
+        // The meter must fall to zero here. Without this it froze at whatever
+        // level the last captured buffer happened to hit and sat there for the
+        // whole save — reading as if the mic were still live.
+        _vuMeter.value = 0f
         _status.value = RecorderStatus.STOPPING
     }
 

@@ -60,8 +60,15 @@ class WhisperEngine(
 
     init {
         require(modelFile.isFile) { "model not found: ${modelFile.absolutePath}" }
-        val preset = DtwPreset.forModelFile(modelFile.name)
-        ctx = WhisperNative.nativeInitContext(modelFile.absolutePath, preset.ordinalValue)
+        // DTW is off deliberately. whisper computes t_dtw per token but never
+        // uses it to set token or segment t0/t1 — the timestamps this engine
+        // reads come from the heuristic path either way. Enabling it added
+        // cross-attention tensors to the graph and a 128 MB ggml arena
+        // allocated on every call, for output nothing consumed.
+        ctx = WhisperNative.nativeInitContext(
+            modelFile.absolutePath,
+            DtwPreset.NONE.ordinalValue,
+        )
         check(ctx != 0L) { "whisper failed to load ${modelFile.name}" }
 
         slots = plan.codes.map { code ->
@@ -86,7 +93,11 @@ class WhisperEngine(
      * the budget is split, never duplicated.
      */
     private val threadsPerDecode: Int
-        get() = (totalThreads / slots.size).coerceAtLeast(1)
+        // Capped at 4 per decode: whisper scales sub-linearly with threads, and
+        // the FP4 has only 2 performance cores behind 6 efficiency ones, so
+        // piling more threads onto one decode buys little. Dual decode gets
+        // 4+4 and actually uses the whole chip.
+        get() = (totalThreads / slots.size).coerceIn(1, MAX_THREADS_PER_DECODE)
 
     override suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word> {
         val durationMs = (pcm.size * 1000L) / SAMPLE_RATE
@@ -223,12 +234,17 @@ class WhisperEngine(
         /** Below ~1s whisper invents text rather than admitting silence. */
         private const val MIN_WINDOW_MS = 1_000L
 
+        /** Beyond this, extra threads on one decode stop paying for themselves. */
+        const val MAX_THREADS_PER_DECODE = 4
+
         /**
-         * The FP4 has 2 performance + 6 efficiency cores. Asking for all 8
-         * schedules work onto the little cores where it runs slower than not
-         * scheduling it at all.
+         * Total threads across all concurrent decodes.
+         *
+         * Was 4, which dual decode split into 2+2 — half the chip idle while
+         * the user waited. Using every core lets dual run 4+4.
          */
-        const val DEFAULT_THREADS = 4
+        val DEFAULT_THREADS: Int =
+            Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
 
         /**
          * Parses "text\tt0\tt1\tprob\tsegIdx" from the JNI layer. Returns null

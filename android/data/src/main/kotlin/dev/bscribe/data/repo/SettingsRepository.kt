@@ -69,12 +69,14 @@ class SettingsRepository(private val context: Context) {
     }
 
     /**
-     * Threads across all concurrent decodes. Defaults to 4 rather than the
-     * FP4's 8 cores: six of those are efficiency cores, and scheduling decode
-     * work onto them is slower than leaving them idle.
+     * Threads across all concurrent decodes.
+     *
+     * Defaults to every core: dual-language decoding splits this budget in
+     * two, so a low value leaves most of the chip idle while the user waits.
      */
     val nThreads: Flow<Int> = context.dataStore.data.map { prefs ->
-        (prefs[keyThreads] ?: 4).coerceIn(1, 8)
+        (prefs[keyThreads] ?: Runtime.getRuntime().availableProcessors())
+            .coerceIn(1, 8)
     }
 
     suspend fun setNThreads(value: Int) {
