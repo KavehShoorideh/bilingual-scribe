@@ -105,7 +105,7 @@ class RecordingService : Service() {
             try {
                 record.startRecording()
                 val buf = ShortArray(spec.sampleRate * 320 / 1000) // 320 ms
-                val meterBlock = spec.sampleRate * 80 / 1000 // 80 ms per level
+                val meterBlock = spec.sampleRate * 20 / 1000 // 20 ms per level
                 while (running) {
                     val n = record.read(buf, 0, buf.size)
                     if (n > 0) {
@@ -115,18 +115,18 @@ class RecordingService : Service() {
                         liveTranscriber.feed(buf, 0, n)
 
                         // One level per buffer meant a meter updating ~3 times
-                        // a second, which reads as stuttering rather than
-                        // responsive. Levels are computed over sub-blocks so
-                        // the meter moves at ~12 Hz; the disk write cadence is
-                        // untouched.
+                        // a second, which reads as stuttering. Levels are
+                        // computed over 20 ms sub-blocks for ~50 Hz, using
+                        // peak rather than RMS so a short syllable is not
+                        // averaged away. The disk write cadence is untouched.
                         val elapsed = baseElapsedMs + writer.durationMs
                         var off = 0
                         while (off < n) {
                             val len = minOf(meterBlock, n - off)
                             state.onProgress(
                                 elapsedMs = elapsed,
-                                vuMeter = PcmLevels.dbToMeter(
-                                    PcmLevels.rmsDb(buf, off, len),
+                                level = PcmLevels.dbToMeter(
+                                    PcmLevels.peakDb(buf, off, len),
                                 ),
                             )
                             off += len

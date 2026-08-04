@@ -64,13 +64,36 @@ class RecorderStateHolder {
         _vuMeter.value = 0f
     }
 
-    fun onProgress(elapsedMs: Long, vuMeter: Float) {
+    /**
+     * @param level 0..1 instantaneous level for this block.
+     *
+     * Attack is instantaneous and release is gradual, the way a level meter is
+     * expected to behave: the bar should be at the syllable the moment it is
+     * spoken, then fall back on its own. Smoothing the rise as well — which is
+     * what an animation between values does — reads as lag, because the meter
+     * arrives after the sound.
+     */
+    fun onProgress(elapsedMs: Long, level: Float) {
         _elapsedMs.value = elapsedMs
-        _vuMeter.value = vuMeter
+        val previous = _vuMeter.value
+        _vuMeter.value = if (level >= previous) {
+            level
+        } else {
+            maxOf(level, previous - RELEASE_PER_BLOCK)
+        }
     }
 
     fun onLiveText(committed: String, hypothesis: String) {
         _committedText.value = committed
         _hypothesisText.value = hypothesis
+    }
+
+    private companion object {
+        /**
+         * How far the meter may fall per 20 ms block — full scale to silence
+         * in about a third of a second. Fast enough to track speech rhythm,
+         * slow enough not to strobe.
+         */
+        const val RELEASE_PER_BLOCK = 0.06f
     }
 }

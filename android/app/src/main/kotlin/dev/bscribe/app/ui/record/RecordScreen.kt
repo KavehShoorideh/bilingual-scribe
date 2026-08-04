@@ -1,8 +1,5 @@
 package dev.bscribe.app.ui.record
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -89,19 +86,11 @@ fun RecordScreen(onFinished: (sessionId: String?) -> Unit) {
                 color = MaterialTheme.colorScheme.secondary,
             )
             Spacer(Modifier.height(12.dp))
-            // Levels arrive in discrete steps; animating between them makes the
-            // meter read as a level rather than as a stuttering bar. Fast
-            // attack, slower release — the way a real VU meter behaves.
-            val animatedVu by animateFloatAsState(
-                targetValue = vu,
-                animationSpec = tween(
-                    durationMillis = if (vu > 0f) 60 else 220,
-                    easing = LinearEasing,
-                ),
-                label = "vu",
-            )
+            // No animation: the level already carries its own attack/decay
+            // envelope from the capture thread at ~50 Hz, and interpolating
+            // between values on top of that only delays the rise.
             LinearProgressIndicator(
-                progress = { animatedVu },
+                progress = { vu },
                 modifier = Modifier.fillMaxWidth().height(8.dp),
             )
             Spacer(Modifier.height(20.dp))
