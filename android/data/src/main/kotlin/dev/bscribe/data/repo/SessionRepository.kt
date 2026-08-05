@@ -184,9 +184,18 @@ class SessionRepository(
     fun observeEdit(recordingId: String): Flow<TranscriptEditEntity?> =
         edits.observe(recordingId)
 
-    /** The model's own text for a recording, as a single string. */
-    suspend fun baselineTextOf(recordingId: String): String =
-        transcriptOf(recordingId).joinToString(" ") { it.text }
+    /**
+     * The model's own text for a recording.
+     *
+     * Speaker turns become blank lines. That keeps the voice changes visible
+     * while staying invisible to [TextDiff], which tokenises on whitespace — a
+     * literal marker in the text would be diffed as if it were something
+     * someone said.
+     */
+    suspend fun baselineTextOf(recordingId: String): String = buildTurnText(
+        transcriptOf(recordingId),
+    )
+
 
     /**
      * Saves an edit.

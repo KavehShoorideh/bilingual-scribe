@@ -76,6 +76,9 @@ import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
 import dev.bscribe.data.db.TranscriptWordEntity
 import dev.bscribe.data.repo.SessionRepository
+import dev.bscribe.data.repo.buildTurnText
+import dev.bscribe.data.repo.joinTurns
+import dev.bscribe.data.repo.splitTurns
 import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -106,7 +109,10 @@ data class EditableTranscript(
     val modelText: String,
     val text: String,
     val edited: Boolean,
-)
+) {
+    /** One entry per speaking turn; a change of voice starts a new one. */
+    val turns: List<String> get() = splitTurns(text)
+}
 
 /** One recording's worth of transcript. */
 data class TranscriptGroup(val recordingId: String, val words: List<TranscriptWordEntity>)
@@ -228,7 +234,7 @@ class SessionDetailViewModel(
                                 repo.observeTranscript(rec.id),
                                 repo.observeEdit(rec.id),
                             ) { words, edit ->
-                                val model = words.joinToString(" ") { it.text }
+                                val model = buildTurnText(words)
                                 rec.id to EditableTranscript(
                                     recordingId = rec.id,
                                     idx = rec.idx,
@@ -701,35 +707,64 @@ private fun EditableSegment(
     onDictationConsumed: () -> Unit,
     onInsertDictation: (current: String, at: Int, text: String) -> Unit,
 ) {
-    var value by remember(item.recordingId) { mutableStateOf(TextFieldValue(item.text)) }
+    // One field per speaking turn, so a change of voice stays visible while
+    // the whole thing is still freely editable. The stored text keeps the
+    // turns as blank lines, which the diff ignores as whitespace.
+    var fields by remember(item.recordingId) {
+        mutableStateOf(item.turns.map { TextFieldValue(it) })
+    }
+    var focused by remember(item.recordingId) { mutableStateOf(0) }
 
-    // Adopt outside changes — a re-transcription, a revert — but only real
-    // ones, so typing is never interrupted by an echo of itself.
     LaunchedEffect(item.text) {
-        if (item.text != value.text) value = value.copy(text = item.text)
+        val incoming = item.turns
+        if (incoming != fields.map { it.text }) {
+            fields = incoming.map { TextFieldValue(it) }
+        }
     }
 
     // Dictated text is inserted at the cursor rather than replacing the field:
     // speaking a correction should behave like typing one.
     LaunchedEffect(dictated) {
         val spoken = dictated ?: return@LaunchedEffect
-        onInsertDictation(value.text, value.selection.start, spoken)
+        val at = fields.getOrNull(focused)
+        if (at != null) {
+            onInsertDictation(at.text, at.selection.start, spoken)
+        }
         onDictationConsumed()
     }
 
     Column(Modifier.padding(bottom = 12.dp)) {
-        OutlinedTextField(
-            value = value,
-            onValueChange = {
-                value = it
-                onTextChanged(it.text)
-            },
-            modifier = Modifier.fillMaxWidth(),
-            textStyle = MaterialTheme.typography.bodyLarge,
-            minLines = 3,
-        )
+        fields.forEachIndexed { i, field ->
+            if (i > 0) {
+                Text(
+                    "— new voice —",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+            }
+            OutlinedTextField(
+                value = field,
+                onValueChange = { changed ->
+                    fields = fields.toMutableList().also { it[i] = changed }
+                    focused = i
+                    onTextChanged(joinTurns(fields.map { it.text }))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                textStyle = MaterialTheme.typography.bodyLarge,
+                minLines = 2,
+            )
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { onPlayFrom(value.selection.start) }) {
+            TextButton(
+                onClick = {
+                    // Offsets are per turn; the transcript is one stream, so
+                    // add the turns before this one back on.
+                    val before = fields.take(focused).sumOf { it.text.length + 2 }
+                    val within = fields.getOrNull(focused)?.selection?.start ?: 0
+                    onPlayFrom(before + within)
+                },
+            ) {
                 Text("Play from cursor")
             }
             when (dictation) {
