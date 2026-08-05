@@ -579,7 +579,7 @@ private fun TranscriptCard(
                     TextButton(onClick = onStop) { Text("Stop") }
                 } else {
                     if (groups.isNotEmpty()) {
-                        TextButton(onClick = onCompare) { Text("Compare") }
+                        TextButton(onClick = onCompare) { Text("Both") }
                     }
                     TextButton(onClick = onTranscribe) {
                         Text(if (groups.isEmpty()) "Transcribe" else "Redo")

@@ -83,7 +83,7 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Compare readings") },
+                title = { Text("Both readings") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -95,9 +95,11 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Text(
-                "Tap whichever line got it right. Your answer is kept as a label — " +
-                    "the decoder's own confidence can't tell a confident mistake from " +
-                    "a correct reading, but you can.",
+                "What each language made of the same audio. A lane is empty where " +
+                    "that language was not what was spoken, and both can agree — " +
+                    "whisper often transcribes English as English even when asked " +
+                    "for Farsi. Tap a line that got it right; your answer is kept " +
+                    "as a label.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(16.dp),

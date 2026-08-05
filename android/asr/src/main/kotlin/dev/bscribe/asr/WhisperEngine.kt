@@ -102,12 +102,14 @@ class WhisperEngine(
      * contend for the same cores and memory bandwidth and both get slower. So
      * the budget is split, never duplicated.
      */
-    private val threadsPerDecode: Int
-        // Capped at 4 per decode: whisper scales sub-linearly with threads, and
-        // the FP4 has only 2 performance cores behind 6 efficiency ones, so
-        // piling more threads onto one decode buys little. Dual decode gets
-        // 4+4 and actually uses the whole chip.
-        get() = (totalThreads / slots.size).coerceIn(1, MAX_THREADS_PER_DECODE)
+    // Capped at 4 per decode: whisper scales sub-linearly with threads, and the
+    // FP4 has only 2 performance cores behind 6 efficiency ones, so piling more
+    // onto one decode buys little. Two concurrent decodes get 4+4 and use the
+    // whole chip; a single decode is not made faster by asking for all eight.
+    private fun threadsFor(activeDecodes: Int): Int =
+        (totalThreads / activeDecodes.coerceAtLeast(1)).coerceIn(1, MAX_THREADS_PER_DECODE)
+
+    private val threadsPerDecode: Int get() = threadsFor(slots.size)
 
     override suspend fun transcribe(pcm: ShortArray, params: DecodeParams): List<Word> =
         transcribePass(pcm, params).chosen
@@ -162,7 +164,12 @@ class WhisperEngine(
             // English than Persian, so a fluent English translation of Persian
             // speech outscores a correct Persian transcription of it.
             val prior = detectLanguages(float)
-            val decoded = decodeWindow(float, params)
+            // Decoding a language the audio plainly is not costs a full decode
+            // to produce something that will be discarded — and, worse, that
+            // whisper is fluent enough to make look plausible. Where the
+            // detector is confident, decode only that language.
+            val active = slotsToRun(prior)
+            val decoded = decodeWindow(float, params, active)
             val merged = SegmentMerge.merge(
                 decoded[slots[0].lang].orEmpty(),
                 decoded.getOrElse(slots.getOrNull(1)?.lang ?: "") { emptyList() },
@@ -177,7 +184,7 @@ class WhisperEngine(
                 TAG,
                 "window ${startMs}..${endMs}ms decoded in ${elapsedMs}ms " +
                     "(RTF ${"%.2f".format(elapsedMs.toDouble() / audioMs)}, " +
-                    "${slots.size} lang x $threadsPerDecode threads)",
+                    "${active.joinToString("+") { it.lang }} x ${threadsFor(active.size)} threads)",
             )
 
             SegmentMerge.words(merged).forEach { w ->
@@ -247,11 +254,33 @@ class WhisperEngine(
         return LanguagePrior(byLang)
     }
 
+    /**
+     * Which languages are worth decoding for this window.
+     *
+     * Ambiguity is kept — a window the detector cannot settle is exactly where
+     * both readings are worth having, and where the user's verdict matters.
+     */
+    private fun slotsToRun(prior: LanguagePrior): List<Slot> {
+        if (slots.size < 2) return slots
+        val ranked = slots.sortedByDescending { prior.probabilities[it.lang] ?: 0f }
+        val top = prior.probabilities[ranked[0].lang] ?: 0f
+        val next = prior.probabilities[ranked[1].lang] ?: 0f
+        return if (top >= CONFIDENT_LANGUAGE && next <= AMBIGUOUS_LANGUAGE) {
+            listOf(ranked[0])
+        } else {
+            slots
+        }
+    }
+
     private suspend fun decodeWindow(
         float: FloatArray,
         params: DecodeParams,
+        active: List<Slot>,
     ): Map<String, List<DecodedSegment>> = coroutineScope {
-        val jobs = slots.map { slot -> slot.lang to async { runDecode(slot, float, params) } }
+        val threads = threadsFor(active.size)
+        val jobs = active.map { slot ->
+            slot.lang to async { runDecode(slot, float, params, threads) }
+        }
         jobs.associate { (lang, job) -> lang to job.await() }
     }
 
@@ -259,13 +288,14 @@ class WhisperEngine(
         slot: Slot,
         float: FloatArray,
         params: DecodeParams,
+        threads: Int = threadsPerDecode,
     ): List<DecodedSegment> = slot.mutex.withLock {
         val ok = WhisperNative.nativeFull(
             ctx = ctx,
             state = slot.handle,
             pcm = float,
             language = slot.lang,
-            nThreads = threadsPerDecode,
+            nThreads = threads,
             beamSize = params.beamSize,
             maxLen = params.maxLen,
             noContext = params.noContext,
@@ -312,6 +342,16 @@ class WhisperEngine(
 
         /** Beyond this, extra threads on one decode stop paying for themselves. */
         const val MAX_THREADS_PER_DECODE = 4
+
+        /**
+         * Detector confidence above which the other language is not decoded at
+         * all. Deliberately high: skipping wrongly costs a whole language, and
+         * the saving is only speed.
+         */
+        const val CONFIDENT_LANGUAGE = 0.85f
+
+        /** …and the runner-up must be this unlikely for the skip to be safe. */
+        const val AMBIGUOUS_LANGUAGE = 0.10f
 
         /**
          * Total threads across all concurrent decodes.
