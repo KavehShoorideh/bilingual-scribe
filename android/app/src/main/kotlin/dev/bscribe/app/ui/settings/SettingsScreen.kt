@@ -56,6 +56,7 @@ fun SettingsScreen(
     val vm: SettingsViewModel = viewModel(factory = SettingsViewModel.factory(context))
     val mode by vm.liveMode.collectAsState()
     val update by vm.updateState.collectAsState()
+    val readyUpdate by vm.readyUpdate.collectAsState()
     val languages by vm.languages.collectAsState()
     val autoTranscribe by vm.autoTranscribe.collectAsState()
 
@@ -226,6 +227,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(12.dp))
             UpdateSection(
                 state = update,
+                ready = readyUpdate,
                 onCheck = vm::checkForUpdate,
                 onDownload = { vm.download(it) },
                 onInstall = {
@@ -233,6 +235,7 @@ fun SettingsScreen(
                     if (error != null) scope.launch { snackbars.showSnackbar(error) }
                 },
                 onDismiss = vm::dismiss,
+                onDiscard = vm::discardDownload,
             )
         }
     }
@@ -241,69 +244,93 @@ fun SettingsScreen(
 @Composable
 private fun UpdateSection(
     state: UpdateState,
+    ready: UpdateState.ReadyToInstall?,
     onCheck: () -> Unit,
     onDownload: (dev.bscribe.data.repo.UpdateInfo) -> Unit,
     onInstall: () -> Unit,
     onDismiss: () -> Unit,
+    onDiscard: () -> Unit,
 ) {
-    when (state) {
-        is UpdateState.Idle -> {
-            Button(onClick = onCheck) { Text("Check for updates") }
+    Column {
+        // A finished download outlives any number of checks, so Install stays
+        // reachable while you look for something newer.
+        if (ready != null) {
+            Text(
+                "Version ${ready.info.versionName} (build ${ready.info.versionCode}) " +
+                    "is downloaded and verified.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = onInstall) { Text("Install") }
+                TextButton(onClick = onCheck) { Text("Check for newer") }
+                TextButton(onClick = onDiscard) { Text("Discard") }
+            }
         }
 
-        is UpdateState.Checking -> {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        when (state) {
+            is UpdateState.Idle ->
+                if (ready == null) {
+                    Button(onClick = onCheck) { Text("Check for updates") }
+                }
+
+            is UpdateState.Checking -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(top = 8.dp),
+            ) {
                 CircularProgressIndicator(Modifier.height(20.dp))
                 Text("Checking…", Modifier.padding(start = 12.dp))
             }
-        }
 
-        is UpdateState.UpToDate -> {
-            Text(
-                "You're on the latest build.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            TextButton(onClick = onCheck) { Text("Check again") }
-        }
-
-        is UpdateState.Available -> {
-            Text(
-                "Version ${state.info.versionName} (build ${state.info.versionCode}) " +
-                    "is available.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Row {
-                Button(onClick = { onDownload(state.info) }) { Text("Download") }
-                TextButton(onClick = onDismiss) { Text("Not now") }
+            is UpdateState.UpToDate -> {
+                Text(
+                    if (ready != null) {
+                        "Nothing newer than what you have downloaded."
+                    } else {
+                        "You're on the latest build."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                if (ready == null) TextButton(onClick = onCheck) { Text("Check again") }
             }
-        }
 
-        is UpdateState.Downloading -> {
-            Text("Downloading ${state.percent}%", style = MaterialTheme.typography.bodyMedium)
-            LinearProgressIndicator(
-                progress = { state.percent / 100f },
-                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-            )
-        }
-
-        is UpdateState.ReadyToInstall -> {
-            Text(
-                "Version ${state.info.versionName} is verified and ready.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Row {
-                Button(onClick = onInstall) { Text("Install") }
-                TextButton(onClick = onDismiss) { Text("Later") }
+            is UpdateState.Available -> {
+                Text(
+                    "Version ${state.info.versionName} (build ${state.info.versionCode}) " +
+                        "is available.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Row {
+                    Button(onClick = { onDownload(state.info) }) { Text("Download") }
+                    TextButton(onClick = onDismiss) { Text("Not now") }
+                }
             }
-        }
 
-        is UpdateState.Failed -> {
-            Text(
-                state.reason,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.error,
-            )
-            TextButton(onClick = onCheck) { Text("Try again") }
+            is UpdateState.Downloading -> {
+                Text(
+                    "Downloading ${state.percent}%",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                LinearProgressIndicator(
+                    progress = { state.percent / 100f },
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                )
+            }
+
+            // Covered by the ready block above; nothing more to add.
+            is UpdateState.ReadyToInstall -> Unit
+
+            is UpdateState.Failed -> {
+                Text(
+                    state.reason,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                TextButton(onClick = onCheck) { Text("Try again") }
+            }
         }
     }
 }

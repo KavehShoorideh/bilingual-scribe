@@ -64,12 +64,35 @@ class UpdateRepository(
     private val cacheDir: File,
     private val currentVersionCode: Int,
     private val latestReleaseUrl: String = DEFAULT_LATEST_RELEASE_URL,
+    /**
+     * How bytes are fetched. Injectable so the download path — verification,
+     * cleanup, what survives a failure — can be tested without a network or a
+     * stub server. The default is the only implementation that ships.
+     */
+    private val fetch: (URL) -> Body = ::httpBody,
 ) {
 
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
 
+    /**
+     * A verified build waiting to be installed.
+     *
+     * Kept apart from [state] so checking again does not throw away a download
+     * you already have: releases can land while an earlier one is sitting
+     * downloaded, and losing the finished file to look for a newer one would
+     * be the wrong trade on a phone connection.
+     */
+    private val _ready = MutableStateFlow<UpdateState.ReadyToInstall?>(null)
+    val ready: StateFlow<UpdateState.ReadyToInstall?> = _ready.asStateFlow()
+
     fun reset() { _state.value = UpdateState.Idle }
+
+    /** Discards a downloaded build, deleting its file. */
+    fun discardReady() {
+        _ready.value?.apk?.delete()
+        _ready.value = null
+    }
 
     suspend fun check() = withContext(Dispatchers.IO) {
         _state.value = UpdateState.Checking
@@ -79,12 +102,27 @@ class UpdateRepository(
                     "This release has no update.json — it predates in-app updates.",
                 )
             val info = UpdateInfo.parse(readText(URL(assetUrl)))
-            _state.value = if (info.versionCode > currentVersionCode) {
-                UpdateState.Available(info)
-            } else {
-                UpdateState.UpToDate(currentVersionCode)
+            val alreadyDownloaded = _ready.value
+
+            _state.value = when {
+                info.versionCode <= currentVersionCode -> UpdateState.UpToDate(currentVersionCode)
+
+                // Newer than the build sitting downloaded: that file is now
+                // stale, so drop it rather than offering to install a version
+                // that is no longer the latest.
+                alreadyDownloaded != null && info.versionCode > alreadyDownloaded.info.versionCode -> {
+                    discardReady()
+                    UpdateState.Available(info)
+                }
+
+                alreadyDownloaded != null -> UpdateState.UpToDate(currentVersionCode)
+
+                else -> UpdateState.Available(info)
             }
         } catch (e: Exception) {
+            // A failed check must not cost a finished download; [ready] is
+            // untouched, so Install stays available while this reports why the
+            // check could not run.
             fail(e.message ?: e.javaClass.simpleName)
         }
     }
@@ -94,9 +132,9 @@ class UpdateRepository(
         val target = File(cacheDir, "update-${info.versionCode}.apk")
         try {
             target.delete()
-            val conn = open(URL(info.apkUrl))
-            val total = conn.contentLengthLong
-            conn.inputStream.use { input ->
+            val body = fetch(URL(info.apkUrl))
+            val total = body.lengthBytes
+            body.stream.use { input ->
                 target.outputStream().use { output ->
                     val buf = ByteArray(1 shl 16)
                     var read = 0L
@@ -124,7 +162,9 @@ class UpdateRepository(
                     "Download is corrupt (checksum mismatch). Not installing.",
                 )
             }
-            _state.value = UpdateState.ReadyToInstall(info, target)
+            val readyState = UpdateState.ReadyToInstall(info, target)
+            _ready.value = readyState
+            _state.value = readyState
         } catch (e: Exception) {
             target.delete()
             fail(e.message ?: e.javaClass.simpleName)
@@ -137,29 +177,38 @@ class UpdateRepository(
 
     // ---- plumbing ----
 
-    private fun open(url: URL): HttpURLConnection =
-        (url.openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 30_000
-            setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", "bilingual-scribe")
-            if (responseCode !in 200..299) {
-                val code = responseCode
-                disconnect()
-                throw IllegalStateException("HTTP $code from $url")
-            }
-        }
+    private fun readText(url: URL): String =
+        fetch(url).stream.use { it.bufferedReader().readText() }
 
-    private fun readText(url: URL): String {
-        val conn = open(url)
-        return try {
-            conn.inputStream.bufferedReader().readText()
-        } finally {
-            conn.disconnect()
-        }
-    }
+    /** A response body and its length, or -1 when the server does not say. */
+    data class Body(val stream: java.io.InputStream, val lengthBytes: Long)
 
     companion object {
+        /** The shipping fetcher: plain HTTP, no caching. */
+        fun httpBody(url: URL): Body {
+            val conn = open(url)
+            return Body(conn.inputStream, conn.contentLengthLong)
+        }
+
+        private fun open(url: URL): HttpURLConnection =
+            (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                setRequestProperty("Accept", "application/vnd.github+json")
+                setRequestProperty("User-Agent", "bilingual-scribe")
+                // Ask for the newest release, not a cached view of it: GitHub
+                // and any intermediary will happily serve a minutes-old
+                // answer, which is long enough to miss a release entirely.
+                setRequestProperty("Cache-Control", "no-cache")
+                setRequestProperty("Pragma", "no-cache")
+                useCaches = false
+                if (responseCode !in 200..299) {
+                    val code = responseCode
+                    disconnect()
+                    throw IllegalStateException("HTTP $code from $url")
+                }
+            }
+
         const val DEFAULT_LATEST_RELEASE_URL =
             "https://api.github.com/repos/KavehShoorideh/bilingual-scribe/releases/latest"
 

@@ -22,6 +22,12 @@ class UpdateRepositoryTest {
 
     @get:Rule val tmp = TemporaryFolder()
 
+    /** Serves local files, so the download path is exercised without a server. */
+    private val fromDisk: (java.net.URL) -> UpdateRepository.Body = { url ->
+        val f = File(url.toURI())
+        UpdateRepository.Body(f.inputStream(), f.length())
+    }
+
     private val sampleUpdateJson = """
         {
           "versionCode": 12,
@@ -112,7 +118,7 @@ class UpdateRepositoryTest {
     fun `a corrupt download is rejected and deleted`() = runTest {
         val cache = tmp.newFolder("cache")
         val served = tmp.newFile("served.apk").apply { writeText("pretend apk") }
-        val repo = UpdateRepository(cache, currentVersionCode = 1)
+        val repo = UpdateRepository(cache, currentVersionCode = 1, fetch = fromDisk)
 
         val info = UpdateInfo(
             versionCode = 2,
@@ -132,5 +138,58 @@ class UpdateRepositoryTest {
             File(cache, "update-2.apk").let { !it.exists() },
             "a failed download must not leave a partial APK behind",
         )
+    }
+
+    @Test
+    fun `a finished download survives a failed check`() = runTest {
+        // Losing a completed download because the network blipped would be the
+        // wrong trade on a phone connection.
+        val cache = tmp.newFolder("cache")
+        val served = tmp.newFile("served.apk").apply { writeText("payload") }
+        val repo = UpdateRepository(
+            cache,
+            currentVersionCode = 1,
+            latestReleaseUrl = "https://bilingual-scribe.invalid/releases/latest",
+            fetch = { url ->
+                // The release check must fail; the APK download must not.
+                if (url.protocol == "file") fromDisk(url) else error("no network")
+            },
+        )
+
+        val info = UpdateInfo(
+            versionCode = 2,
+            versionName = "0.2.0",
+            tag = "v0.2.0",
+            apkUrl = served.toURI().toURL().toString(),
+            sha256 = UpdateRepository.sha256(served),
+        )
+        repo.download(info)
+        assertTrue(repo.ready.value != null, "download should be ready")
+
+        repo.check()
+        assertTrue(repo.state.value is UpdateState.Failed, "the check itself failed")
+        assertTrue(repo.ready.value != null, "the downloaded build must still be installable")
+    }
+
+    @Test
+    fun `discarding a download deletes its file`() = runTest {
+        val cache = tmp.newFolder("cache")
+        val served = tmp.newFile("served.apk").apply { writeText("payload") }
+        val repo = UpdateRepository(cache, currentVersionCode = 1, fetch = fromDisk)
+        repo.download(
+            UpdateInfo(
+                versionCode = 2,
+                versionName = "0.2.0",
+                tag = "v0.2.0",
+                apkUrl = served.toURI().toURL().toString(),
+                sha256 = UpdateRepository.sha256(served),
+            ),
+        )
+        val apk = repo.ready.value?.apk
+        assertTrue(apk != null && apk.exists())
+
+        repo.discardReady()
+        assertNull(repo.ready.value)
+        assertTrue(!apk!!.exists(), "discarding must not leave the file behind")
     }
 }

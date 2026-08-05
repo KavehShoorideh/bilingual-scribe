@@ -37,6 +37,9 @@ class SettingsViewModel(
 
     val updateState: StateFlow<UpdateState> = updates.state
 
+    /** A verified build waiting to install, independent of the check state. */
+    val readyUpdate: StateFlow<UpdateState.ReadyToInstall?> = updates.ready
+
     fun setLiveMode(mode: LiveTranscriptMode) {
         viewModelScope.launch { settings.setLiveTranscriptMode(mode) }
     }
@@ -63,8 +66,7 @@ class SettingsViewModel(
      * a paused session still owns un-finalized state.
      */
     fun install(): String? {
-        val ready = updateState.value as? UpdateState.ReadyToInstall
-            ?: return "Nothing is ready to install."
+        val ready = readyUpdate.value ?: return "Nothing is ready to install."
         if (recorder.status.value != RecorderStatus.IDLE) {
             return "Stop the current recording before updating."
         }
@@ -72,6 +74,8 @@ class SettingsViewModel(
     }
 
     fun dismiss() = updates.reset()
+
+    fun discardDownload() = updates.discardReady()
 
     companion object {
         fun factory(context: Context) = viewModelFactory {
