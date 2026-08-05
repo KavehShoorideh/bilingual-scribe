@@ -133,6 +133,13 @@ interface CorrectionDao {
     @Query("UPDATE corrections SET archived = 1 WHERE recordingId = :recordingId")
     suspend fun archiveByRecording(recordingId: String)
 
+    /** Retires earlier verdicts covering any of the same words. */
+    @Query(
+        "UPDATE corrections SET archived = 1 WHERE recordingId = :recordingId " +
+            "AND archived = 0 AND firstWordIdx <= :lastWordIdx AND lastWordIdx >= :firstWordIdx",
+    )
+    suspend fun archiveOverlapping(recordingId: String, firstWordIdx: Int, lastWordIdx: Int)
+
     @Query("DELETE FROM corrections WHERE id = :id")
     suspend fun delete(id: String)
 }

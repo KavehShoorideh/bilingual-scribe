@@ -160,6 +160,41 @@ class TranscriptionRunner(
     }
 
     /**
+     * Transcribes a short dictated clip, using whatever model and languages
+     * the final pass is configured with.
+     *
+     * @return the text, or null if no model is installed or the decode failed.
+     */
+    suspend fun transcribeClip(wav: java.io.File): String? {
+        val spec = ModelCatalog.byFileName(settings.finalModelFile.first())
+            ?: ModelCatalog.defaultFinal
+        if (!models.isInstalled(spec)) return null
+
+        val plan = when (settings.transcribeLanguages.first()) {
+            TranscribeLanguages.BOTH -> LanguagePlan.DUAL
+            TranscribeLanguages.ENGLISH -> LanguagePlan.ENGLISH_ONLY
+            TranscribeLanguages.FARSI -> LanguagePlan.FARSI_ONLY
+        }
+        val threads = settings.nThreads.first()
+
+        var engine: WhisperEngine? = null
+        return try {
+            engine = WhisperEngine(models.fileFor(spec), plan, threads)
+            val durationMs = WavReader.info(wav).durationMs
+            val pass = engine.transcribeWindowed(
+                durationMs = durationMs,
+                params = DecodeParams(nThreads = threads),
+            ) { s, e -> WavReader.readRange(wav, s, e) }
+            pass.chosen.joinToString(" ") { it.text }.trim().ifBlank { null }
+        } catch (e: Exception) {
+            Log.e(TAG, "dictation transcribe failed", e)
+            null
+        } finally {
+            engine?.close()
+        }
+    }
+
+    /**
      * Marks where the voice changes, so the transcript can start a new
      * paragraph instead of running two people together.
      *

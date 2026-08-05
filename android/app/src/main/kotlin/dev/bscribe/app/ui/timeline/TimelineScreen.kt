@@ -24,9 +24,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -67,6 +70,15 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
     val positionMs by vm.positionMs.collectAsState()
     val isPlaying by vm.isPlaying.collectAsState()
     val durationMs by vm.durationMs.collectAsState()
+    val lastChoice by vm.lastChoice.collectAsState()
+
+    val snackbars = remember { SnackbarHostState() }
+    LaunchedEffect(lastChoice) {
+        lastChoice?.let {
+            snackbars.showSnackbar(it)
+            vm.clearLastChoice()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -79,6 +91,7 @@ fun TimelineScreen(sessionId: String, onBack: () -> Unit) {
                 },
             )
         },
+        snackbarHost = { SnackbarHost(snackbars) },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Text(

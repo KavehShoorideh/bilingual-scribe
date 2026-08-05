@@ -9,6 +9,7 @@ import dev.bscribe.core.audio.WavSpec
 import dev.bscribe.core.model.SessionState
 import dev.bscribe.data.db.RecordingEntity
 import dev.bscribe.data.db.ScribeDatabase
+import dev.bscribe.data.db.CorrectionEntity
 import dev.bscribe.data.db.LanguageFeedbackEntity
 import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
@@ -33,6 +34,7 @@ class SessionRepository(
     private val recordings get() = db.recordingDao()
     private val transcripts get() = db.transcriptDao()
     private val feedback get() = db.feedbackDao()
+    private val corrections get() = db.correctionDao()
 
     fun observeSessions(): Flow<List<SessionWithRecordings>> = sessions.observeAllWithRecordings()
 
@@ -97,6 +99,9 @@ class SessionRepository(
      * the transcript to that reading.
      */
     suspend fun chooseLanguage(recordingId: String, t0Ms: Long, t1Ms: Long, lang: String) {
+        // Apply the verdict as well as recording it. Without this a tap wrote
+        // a label and changed nothing on screen, so it read as doing nothing.
+        transcripts.chooseVariant(recordingId, t0Ms, t1Ms, lang)
         feedback.deleteOverlapping(recordingId, t0Ms, t1Ms)
         feedback.insert(
             LanguageFeedbackEntity(
@@ -106,6 +111,48 @@ class SessionRepository(
                 t1Ms = t1Ms,
                 chosenLang = lang,
                 createdAt = clock(),
+            ),
+        )
+    }
+
+    fun observeCorrections(recordingId: String): Flow<List<CorrectionEntity>> =
+        corrections.observeActiveByRecording(recordingId)
+
+    /**
+     * Saves a correction over a span of words.
+     *
+     * The underlying words are never edited. A correction is an overlay, which
+     * is what makes it usable as training data: the pair of what the model
+     * heard and what was actually said is the signal, and rewriting the words
+     * in place would destroy half of it.
+     *
+     * An empty [correctedText] means the span was not speech at all.
+     */
+    suspend fun applyCorrection(
+        recordingId: String,
+        firstWordIdx: Int,
+        lastWordIdx: Int,
+        t0Ms: Long,
+        t1Ms: Long,
+        originalText: String,
+        correctedText: String,
+    ) {
+        // Replace any earlier verdict on overlapping words rather than
+        // stacking contradictory corrections on the same audio.
+        corrections.archiveOverlapping(recordingId, firstWordIdx, lastWordIdx)
+        corrections.insert(
+            CorrectionEntity(
+                id = UUID.randomUUID().toString(),
+                recordingId = recordingId,
+                firstWordIdx = firstWordIdx,
+                lastWordIdx = lastWordIdx,
+                t0Ms = t0Ms,
+                t1Ms = t1Ms,
+                originalText = originalText,
+                correctedText = correctedText,
+                archived = false,
+                createdAt = clock(),
+                updatedAt = clock(),
             ),
         )
     }

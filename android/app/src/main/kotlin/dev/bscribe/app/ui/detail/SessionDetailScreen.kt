@@ -1,7 +1,9 @@
 package dev.bscribe.app.ui.detail
 
 import android.content.Context
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +48,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
@@ -58,15 +63,19 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import dev.bscribe.app.appContainer
+import dev.bscribe.app.record.QuickRecorder
+import dev.bscribe.app.record.RecorderStatus
 import dev.bscribe.app.record.RecordingService
 import dev.bscribe.app.record.TranscribeOutcome
 import dev.bscribe.app.util.formatClock
 import dev.bscribe.app.util.formatTimestamp
 import dev.bscribe.core.model.SessionState
+import dev.bscribe.data.db.CorrectionEntity
 import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
 import dev.bscribe.data.db.TranscriptWordEntity
 import dev.bscribe.data.repo.SessionRepository
+import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -77,6 +86,9 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** A contiguous span of words picked for correction. */
+data class Selection(val recordingId: String, val first: Int, val last: Int)
 
 /** One recording's worth of transcript. */
 data class TranscriptGroup(val recordingId: String, val words: List<TranscriptWordEntity>)
@@ -162,6 +174,118 @@ class SessionDetailViewModel(
         player.play()
     }
 
+    /** Corrections overlaying the current transcript, per recording. */
+    val corrections: StateFlow<Map<String, List<CorrectionEntity>>> =
+        repo.observeSession(sessionId)
+            .flatMapLatest { s ->
+                val recs = s?.recordings.orEmpty().sortedBy { it.idx }
+                if (recs.isEmpty()) {
+                    flowOf(emptyMap())
+                } else {
+                    combine(recs.map { repo.observeCorrections(it.id) }) { arrays ->
+                        recs.mapIndexed { i, rec -> rec.id to arrays[i] }.toMap()
+                    }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    /** (recordingId, wordIdx) pairs currently selected for correction. */
+    private val _selection = MutableStateFlow<Selection?>(null)
+    val selection: StateFlow<Selection?> = _selection.asStateFlow()
+
+    fun toggleSelection(recordingId: String, wordIdx: Int) {
+        val current = _selection.value
+        _selection.value = when {
+            current == null || current.recordingId != recordingId ->
+                Selection(recordingId, wordIdx, wordIdx)
+            // Tapping inside the selection collapses it back to one word;
+            // tapping outside extends to cover everything between.
+            wordIdx in current.first..current.last && current.first != current.last ->
+                Selection(recordingId, wordIdx, wordIdx)
+            else -> Selection(
+                recordingId,
+                minOf(current.first, wordIdx),
+                maxOf(current.last, wordIdx),
+            )
+        }
+    }
+
+    fun clearSelection() { _selection.value = null }
+
+    suspend fun selectedWords(): List<TranscriptWordEntity> {
+        val sel = _selection.value ?: return emptyList()
+        return repo.transcriptOf(sel.recordingId)
+            .filter { it.wordIdx in sel.first..sel.last }
+            .sortedBy { it.wordIdx }
+    }
+
+    // ---- dictation ----
+
+    private val _dictation = MutableStateFlow<DictationState>(DictationState.Idle)
+    val dictation: StateFlow<DictationState> = _dictation.asStateFlow()
+
+    private val _dictated = MutableStateFlow<String?>(null)
+    val dictated: StateFlow<String?> = _dictated.asStateFlow()
+
+    private var recorder: QuickRecorder? = null
+
+    fun startDictation(context: Context) {
+        if (context.appContainer.recorderState.status.value != RecorderStatus.IDLE) {
+            _dictation.value = DictationState.Failed("Stop the current recording first.")
+            return
+        }
+        _dictated.value = null
+        val file = File(context.cacheDir, "dictation.wav")
+        file.delete()
+        recorder = QuickRecorder(file).also { it.start() }
+        _dictation.value = DictationState.Recording
+    }
+
+    fun stopDictation(context: Context) {
+        val file = recorder?.stop()
+        recorder = null
+        if (file == null) {
+            _dictation.value = DictationState.Failed("Nothing was recorded.")
+            return
+        }
+        _dictation.value = DictationState.Transcribing
+        viewModelScope.launch {
+            val text = context.appContainer.transcriptionRunner.transcribeClip(file)
+            _dictation.value = if (text == null) {
+                DictationState.Failed("Could not transcribe that. Type it instead.")
+            } else {
+                _dictated.value = text
+                DictationState.Idle
+            }
+            file.delete()
+        }
+    }
+
+    fun resetDictation() {
+        recorder?.stop()
+        recorder = null
+        _dictation.value = DictationState.Idle
+        _dictated.value = null
+    }
+
+    fun saveCorrection(text: String) {
+        val sel = _selection.value ?: return
+        viewModelScope.launch {
+            val words = selectedWords()
+            if (words.isEmpty()) return@launch
+            repo.applyCorrection(
+                recordingId = sel.recordingId,
+                firstWordIdx = sel.first,
+                lastWordIdx = sel.last,
+                t0Ms = words.first().t0Ms,
+                t1Ms = words.last().t1Ms,
+                originalText = words.joinToString(" ") { it.text },
+                correctedText = text.trim(),
+            )
+            _selection.value = null
+        }
+    }
+
     fun retranscribe(context: Context) {
         context.appContainer.transcriptionRunner.clearOutcome()
         context.startForegroundService(
@@ -235,6 +359,19 @@ fun SessionDetailScreen(
     val isPlaying by viewModel.isPlaying.collectAsState()
     val transcript by viewModel.transcript.collectAsState()
     val outcome by context.appContainer.transcriptionRunner.lastOutcome.collectAsState()
+    val selection by viewModel.selection.collectAsState()
+    val corrections by viewModel.corrections.collectAsState()
+    val dictation by viewModel.dictation.collectAsState()
+    val dictated by viewModel.dictated.collectAsState()
+    var correcting by remember { mutableStateOf(false) }
+    var selectedText by remember { mutableStateOf("") }
+
+    // The sheet needs the words themselves, which live behind a suspend read.
+    LaunchedEffect(correcting, selection) {
+        if (correcting) {
+            selectedText = viewModel.selectedWords().joinToString(" ") { it.text }
+        }
+    }
 
     var showRename by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
@@ -287,11 +424,32 @@ fun SessionDetailScreen(
 
             Spacer(Modifier.padding(8.dp))
 
+            if (selection != null) {
+                Card(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "${selection!!.last - selection!!.first + 1} word(s) selected",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { correcting = true }) { Text("Correct") }
+                        TextButton(onClick = viewModel::clearSelection) { Text("Cancel") }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
             TranscriptCard(
                 groups = transcript,
                 session = session,
                 outcome = outcome,
+                selection = selection,
+                corrections = corrections,
                 onWordTap = viewModel::playWord,
+                onWordLongPress = viewModel::toggleSelection,
                 onTranscribe = { viewModel.retranscribe(context) },
                 onStop = { viewModel.stopTranscribing(context) },
                 onCompare = onCompare,
@@ -320,6 +478,25 @@ fun SessionDetailScreen(
             dismissButton = {
                 TextButton(onClick = { showRename = false }) { Text("Cancel") }
             },
+        )
+    }
+
+    if (correcting) {
+        CorrectionSheet(
+            originalText = selectedText,
+            dictation = dictation,
+            dictated = dictated,
+            onDismiss = {
+                correcting = false
+                viewModel.resetDictation()
+            },
+            onSave = { text ->
+                viewModel.saveCorrection(text)
+                correcting = false
+                viewModel.resetDictation()
+            },
+            onStartDictation = { viewModel.startDictation(context) },
+            onStopDictation = { viewModel.stopDictation(context) },
         )
     }
 
@@ -358,7 +535,10 @@ private fun TranscriptCard(
     groups: List<TranscriptGroup>,
     session: SessionEntity?,
     outcome: TranscribeOutcome?,
+    selection: Selection?,
+    corrections: Map<String, List<CorrectionEntity>>,
     onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
+    onWordLongPress: (recordingId: String, wordIdx: Int) -> Unit,
     onTranscribe: () -> Unit,
     onStop: () -> Unit,
     onCompare: () -> Unit,
@@ -453,7 +633,14 @@ private fun TranscriptCard(
                                     modifier = Modifier.padding(top = 12.dp),
                                 )
                             }
-                            LanguageRuns(turnWords, group.recordingId, onWordTap)
+                            LanguageRuns(
+                                words = turnWords,
+                                recordingId = group.recordingId,
+                                selection = selection,
+                                corrections = corrections[group.recordingId].orEmpty(),
+                                onWordTap = onWordTap,
+                                onWordLongPress = onWordLongPress,
+                            )
                         }
                 }
             }
@@ -472,7 +659,10 @@ private fun TranscriptCard(
 private fun LanguageRuns(
     words: List<TranscriptWordEntity>,
     recordingId: String,
+    selection: Selection?,
+    corrections: List<CorrectionEntity>,
     onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
+    onWordLongPress: (recordingId: String, wordIdx: Int) -> Unit,
 ) {
     Column {
         languageRuns(words).forEach { run ->
@@ -486,7 +676,23 @@ private fun LanguageRuns(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     run.words.forEach { word ->
-                        WordChip(word) { onWordTap(recordingId, word.t0Ms) }
+                        // A correction covers a span, so only its first word
+                        // renders the replacement; the rest are folded into it.
+                        val covering = corrections.firstOrNull {
+                            word.wordIdx in it.firstWordIdx..it.lastWordIdx
+                        }
+                        if (covering != null && word.wordIdx != covering.firstWordIdx) {
+                            return@forEach
+                        }
+                        WordChip(
+                            word = word,
+                            corrected = covering?.correctedText,
+                            selected = selection != null &&
+                                selection.recordingId == recordingId &&
+                                word.wordIdx in selection.first..selection.last,
+                            onTap = { onWordTap(recordingId, word.t0Ms) },
+                            onLongPress = { onWordLongPress(recordingId, word.wordIdx) },
+                        )
                     }
                 }
             }
@@ -494,18 +700,45 @@ private fun LanguageRuns(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun WordChip(word: TranscriptWordEntity, onTap: () -> Unit) {
+private fun WordChip(
+    word: TranscriptWordEntity,
+    corrected: String?,
+    selected: Boolean,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+) {
     // Low-confidence words are muted rather than hidden — knowing whisper was
     // unsure is more useful than a confident-looking wrong word.
     val alpha = if (word.prob < LOW_CONFIDENCE) 0.45f else 1f
+    val deleted = corrected != null && corrected.isBlank()
+
     Text(
-        text = word.text,
+        text = when {
+            deleted -> word.text
+            corrected != null -> corrected
+            else -> word.text
+        },
         style = MaterialTheme.typography.bodyLarge,
-        color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+        textDecoration = if (deleted) TextDecoration.LineThrough else null,
+        color = when {
+            deleted -> MaterialTheme.colorScheme.onSurfaceVariant
+            // A corrected word is yours, not the model's, and should read that
+            // way at a glance.
+            corrected != null -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
+        },
         modifier = Modifier
             .clip(MaterialTheme.shapes.small)
-            .clickable(onClick = onTap)
+            .background(
+                if (selected) {
+                    MaterialTheme.colorScheme.secondaryContainer
+                } else {
+                    androidx.compose.ui.graphics.Color.Transparent
+                },
+            )
+            .combinedClickable(onClick = onTap, onLongClick = onLongPress)
             .padding(horizontal = 4.dp, vertical = 2.dp),
     )
 }

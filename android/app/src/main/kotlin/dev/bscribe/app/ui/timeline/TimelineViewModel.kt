@@ -123,14 +123,30 @@ class TimelineViewModel(
         return base + player.currentPosition
     }
 
+    /**
+     * Maps session-absolute time back to a recording. Loaded independently of
+     * the player, because tapping a word must work before anything has been
+     * played — previously the offsets were only populated by playback, so an
+     * early tap silently did nothing.
+     */
+    private suspend fun loadOffsets(): List<Pair<String, Long>> {
+        if (offsets.isEmpty()) {
+            val recs = repo.recordingsOf(sessionId)
+                .filter { it.durationMs > 0 }
+                .sortedBy { it.idx }
+            var running = 0L
+            offsets = recs.map { r -> (r.id to running).also { running += r.durationMs } }
+        }
+        return offsets
+    }
+
     private suspend fun ensureQueued(): Boolean {
         if (queued) return true
         val recs = repo.recordingsOf(sessionId).filter { it.durationMs > 0 }.sortedBy { it.idx }
         if (recs.isEmpty()) return false
         player.setMediaItems(recs.map { MediaItem.fromUri(repo.resolveWav(it).toUri()) })
         player.prepare()
-        var running = 0L
-        offsets = recs.map { r -> (r.id to running).also { running += r.durationMs } }
+        loadOffsets()
         queued = true
         return true
     }
@@ -172,15 +188,23 @@ class TimelineViewModel(
         viewModelScope.launch {
             // Times on the lanes are session-absolute; feedback is stored per
             // recording, so map back through the offsets.
-            val entry = offsets.lastOrNull { t0Ms >= it.second } ?: return@launch
+            val entry = loadOffsets().lastOrNull { t0Ms >= it.second } ?: return@launch
             repo.chooseLanguage(
                 recordingId = entry.first,
                 t0Ms = t0Ms - entry.second,
                 t1Ms = t1Ms - entry.second,
                 lang = lang,
             )
+            _lastChoice.value = if (lang == "fa") "Marked as Farsi" else "Marked as English"
         }
     }
+
+    private val _lastChoice = MutableStateFlow<String?>(null)
+
+    /** Confirmation text for the most recent verdict, shown then cleared. */
+    val lastChoice: StateFlow<String?> = _lastChoice.asStateFlow()
+
+    fun clearLastChoice() { _lastChoice.value = null }
 
     override fun onCleared() {
         player.release()
