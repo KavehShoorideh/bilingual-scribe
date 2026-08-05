@@ -48,7 +48,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
@@ -69,6 +69,7 @@ import dev.bscribe.app.record.RecordingService
 import dev.bscribe.app.record.TranscribeOutcome
 import dev.bscribe.app.util.formatClock
 import dev.bscribe.app.util.formatTimestamp
+import dev.bscribe.core.asr.TextDiff
 import dev.bscribe.core.model.SessionState
 import dev.bscribe.data.db.CorrectionEntity
 import dev.bscribe.data.db.SessionEntity
@@ -85,10 +86,27 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** A contiguous span of words picked for correction. */
-data class Selection(val recordingId: String, val first: Int, val last: Int)
+/** What the voice route is doing, if anything. */
+sealed interface DictationState {
+    data object Idle : DictationState
+    data object Recording : DictationState
+    data object Transcribing : DictationState
+    data class Failed(val reason: String) : DictationState
+}
+
+/** A recording's transcript as the user sees and edits it. */
+data class EditableTranscript(
+    val recordingId: String,
+    val idx: Int,
+    /** What the model produced, for reverting and for knowing an edit exists. */
+    val modelText: String,
+    val text: String,
+    val edited: Boolean,
+)
 
 /** One recording's worth of transcript. */
 data class TranscriptGroup(val recordingId: String, val words: List<TranscriptWordEntity>)
@@ -189,34 +207,79 @@ class SessionDetailViewModel(
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    /** (recordingId, wordIdx) pairs currently selected for correction. */
-    private val _selection = MutableStateFlow<Selection?>(null)
-    val selection: StateFlow<Selection?> = _selection.asStateFlow()
+    /**
+     * The transcript as editable text, one entry per recording.
+     *
+     * Editing the whole thing is the interaction; the correction pairs that
+     * training needs are recovered afterwards by diffing (see [TextDiff]).
+     * Selecting spans and fixing them individually was more precise and much
+     * harder to use, and precision nobody uses is worth nothing.
+     */
+    val editable: StateFlow<Map<String, EditableTranscript>> =
+        repo.observeSession(sessionId)
+            .flatMapLatest { s ->
+                val recs = s?.recordings.orEmpty().filter { it.durationMs > 0 }.sortedBy { it.idx }
+                if (recs.isEmpty()) {
+                    flowOf(emptyMap())
+                } else {
+                    combine(
+                        recs.map { rec ->
+                            combine(
+                                repo.observeTranscript(rec.id),
+                                repo.observeEdit(rec.id),
+                            ) { words, edit ->
+                                val model = words.joinToString(" ") { it.text }
+                                rec.id to EditableTranscript(
+                                    recordingId = rec.id,
+                                    idx = rec.idx,
+                                    modelText = model,
+                                    text = edit?.editedText ?: model,
+                                    edited = edit != null && edit.editedText != edit.baselineText,
+                                )
+                            }
+                        },
+                    ) { it.toMap() }
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    fun toggleSelection(recordingId: String, wordIdx: Int) {
-        val current = _selection.value
-        _selection.value = when {
-            current == null || current.recordingId != recordingId ->
-                Selection(recordingId, wordIdx, wordIdx)
-            // Tapping inside the selection collapses it back to one word;
-            // tapping outside extends to cover everything between.
-            wordIdx in current.first..current.last && current.first != current.last ->
-                Selection(recordingId, wordIdx, wordIdx)
-            else -> Selection(
-                recordingId,
-                minOf(current.first, wordIdx),
-                maxOf(current.last, wordIdx),
-            )
+    private val saveJobs = mutableMapOf<String, Job>()
+
+    private val _savedAt = MutableStateFlow<Long?>(null)
+    val savedAt: StateFlow<Long?> = _savedAt.asStateFlow()
+
+    /**
+     * Debounced, so a write does not happen on every keystroke — but short
+     * enough that putting the phone down mid-sentence still keeps the edit.
+     */
+    fun onTextChanged(recordingId: String, text: String) {
+        saveJobs.remove(recordingId)?.cancel()
+        saveJobs[recordingId] = viewModelScope.launch {
+            delay(SAVE_DEBOUNCE_MS)
+            repo.saveEdit(recordingId, text)
+            _savedAt.value = System.currentTimeMillis()
         }
     }
 
-    fun clearSelection() { _selection.value = null }
+    fun revertEdit(recordingId: String) {
+        viewModelScope.launch { repo.revertEdit(recordingId) }
+    }
 
-    suspend fun selectedWords(): List<TranscriptWordEntity> {
-        val sel = _selection.value ?: return emptyList()
-        return repo.transcriptOf(sel.recordingId)
-            .filter { it.wordIdx in sel.first..sel.last }
-            .sortedBy { it.wordIdx }
+    /** Plays from wherever the cursor sits, mapping character offset to time. */
+    fun playFromCursor(recordingId: String, charOffset: Int) {
+        viewModelScope.launch {
+            val words = repo.transcriptOf(recordingId)
+            if (words.isEmpty()) return@launch
+            var consumed = 0
+            for (w in words) {
+                consumed += w.text.length + 1 // the joining space
+                if (charOffset <= consumed) {
+                    playWord(recordingId, w.t0Ms)
+                    return@launch
+                }
+            }
+            playWord(recordingId, words.last().t0Ms)
+        }
     }
 
     // ---- dictation ----
@@ -268,22 +331,12 @@ class SessionDetailViewModel(
         _dictated.value = null
     }
 
-    fun saveCorrection(text: String) {
-        val sel = _selection.value ?: return
-        viewModelScope.launch {
-            val words = selectedWords()
-            if (words.isEmpty()) return@launch
-            repo.applyCorrection(
-                recordingId = sel.recordingId,
-                firstWordIdx = sel.first,
-                lastWordIdx = sel.last,
-                t0Ms = words.first().t0Ms,
-                t1Ms = words.last().t1Ms,
-                originalText = words.joinToString(" ") { it.text },
-                correctedText = text.trim(),
-            )
-            _selection.value = null
-        }
+    /** Appends dictated text at the cursor rather than replacing everything. */
+    fun applyDictation(recordingId: String, current: String, insertAt: Int, dictated: String) {
+        val at = insertAt.coerceIn(0, current.length)
+        val separator = if (at > 0 && !current[at - 1].isWhitespace()) " " else ""
+        val text = current.substring(0, at) + separator + dictated + current.substring(at)
+        onTextChanged(recordingId, text)
     }
 
     fun toggleReviewed() {
@@ -350,6 +403,9 @@ class SessionDetailViewModel(
          * playback mid-syllable makes an accurate timestamp feel broken.
          */
         private const val PLAY_LEAD_IN_MS = 120L
+
+        /** Long enough not to write per keystroke, short enough to be safe. */
+        private const val SAVE_DEBOUNCE_MS = 700L
     }
 }
 
@@ -367,19 +423,10 @@ fun SessionDetailScreen(
     val isPlaying by viewModel.isPlaying.collectAsState()
     val transcript by viewModel.transcript.collectAsState()
     val outcome by context.appContainer.transcriptionRunner.lastOutcome.collectAsState()
-    val selection by viewModel.selection.collectAsState()
-    val corrections by viewModel.corrections.collectAsState()
+    val editable by viewModel.editable.collectAsState()
+    val savedAt by viewModel.savedAt.collectAsState()
     val dictation by viewModel.dictation.collectAsState()
     val dictated by viewModel.dictated.collectAsState()
-    var correcting by remember { mutableStateOf(false) }
-    var selectedText by remember { mutableStateOf("") }
-
-    // The sheet needs the words themselves, which live behind a suspend read.
-    LaunchedEffect(correcting, selection) {
-        if (correcting) {
-            selectedText = viewModel.selectedWords().joinToString(" ") { it.text }
-        }
-    }
 
     var showRename by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
@@ -432,25 +479,7 @@ fun SessionDetailScreen(
 
             Spacer(Modifier.padding(8.dp))
 
-            if (selection != null) {
-                Card(Modifier.fillMaxWidth()) {
-                    Row(
-                        Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            "${selection!!.last - selection!!.first + 1} word(s) selected",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { correcting = true }) { Text("Correct") }
-                        TextButton(onClick = viewModel::clearSelection) { Text("Cancel") }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-
-            if (session != null && transcript.isNotEmpty()) {
+            if (session != null && editable.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 ReviewCard(
                     reviewedAt = session.reviewedAt,
@@ -460,13 +489,19 @@ fun SessionDetailScreen(
             }
 
             TranscriptCard(
-                groups = transcript,
+                editable = editable,
                 session = session,
                 outcome = outcome,
-                selection = selection,
-                corrections = corrections,
-                onWordTap = viewModel::playWord,
-                onWordLongPress = viewModel::toggleSelection,
+                savedAt = savedAt,
+                dictation = dictation,
+                dictated = dictated,
+                onStartDictation = { viewModel.startDictation(context) },
+                onStopDictation = { viewModel.stopDictation(context) },
+                onDictationConsumed = viewModel::resetDictation,
+                onInsertDictation = viewModel::applyDictation,
+                onTextChanged = viewModel::onTextChanged,
+                onRevert = viewModel::revertEdit,
+                onPlayFrom = viewModel::playFromCursor,
                 onTranscribe = { viewModel.retranscribe(context) },
                 onStop = { viewModel.stopTranscribing(context) },
                 onCompare = onCompare,
@@ -495,25 +530,6 @@ fun SessionDetailScreen(
             dismissButton = {
                 TextButton(onClick = { showRename = false }) { Text("Cancel") }
             },
-        )
-    }
-
-    if (correcting) {
-        CorrectionSheet(
-            originalText = selectedText,
-            dictation = dictation,
-            dictated = dictated,
-            onDismiss = {
-                correcting = false
-                viewModel.resetDictation()
-            },
-            onSave = { text ->
-                viewModel.saveCorrection(text)
-                correcting = false
-                viewModel.resetDictation()
-            },
-            onStartDictation = { viewModel.startDictation(context) },
-            onStopDictation = { viewModel.stopDictation(context) },
         )
     }
 
@@ -546,26 +562,28 @@ fun SessionDetailScreen(
  * rather than whisper's heuristic timestamps, which jitter enough to land on
  * a neighbouring word.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TranscriptCard(
-    groups: List<TranscriptGroup>,
+    editable: Map<String, EditableTranscript>,
     session: SessionEntity?,
     outcome: TranscribeOutcome?,
-    selection: Selection?,
-    corrections: Map<String, List<CorrectionEntity>>,
-    onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
-    onWordLongPress: (recordingId: String, wordIdx: Int) -> Unit,
+    savedAt: Long?,
+    dictation: DictationState,
+    dictated: String?,
+    onStartDictation: () -> Unit,
+    onStopDictation: () -> Unit,
+    onDictationConsumed: () -> Unit,
+    onInsertDictation: (recordingId: String, current: String, at: Int, text: String) -> Unit,
+    onTextChanged: (recordingId: String, text: String) -> Unit,
+    onRevert: (recordingId: String) -> Unit,
+    onPlayFrom: (recordingId: String, charOffset: Int) -> Unit,
     onTranscribe: () -> Unit,
     onStop: () -> Unit,
     onCompare: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Transcript",
                     style = MaterialTheme.typography.titleMedium,
@@ -573,38 +591,29 @@ private fun TranscriptCard(
                 )
                 if (session?.state == SessionState.TRANSCRIBING) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    // A session can sit in TRANSCRIBING with nothing running
-                    // if the process died mid-pass, so this must always be
-                    // reachable rather than only when a job exists.
                     TextButton(onClick = onStop) { Text("Stop") }
                 } else {
-                    if (groups.isNotEmpty()) {
+                    if (editable.isNotEmpty()) {
                         TextButton(onClick = onCompare) { Text("Both") }
                     }
                     TextButton(onClick = onTranscribe) {
-                        Text(if (groups.isEmpty()) "Transcribe" else "Redo")
+                        Text(if (editable.isEmpty()) "Transcribe" else "Redo")
                     }
                 }
             }
 
-            // What the last pass actually cost. "Slow" is not actionable;
-            // "1.8x realtime on Base with both languages" tells you which
-            // setting to change.
-            if (session?.transcribeWallMs != null && session.transcribeAudioMs != null) {
-                val rtf = session.transcribeWallMs!!.toDouble() /
-                    session.transcribeAudioMs!!.coerceAtLeast(1)
+            val wall = session?.transcribeWallMs
+            val audio = session?.transcribeAudioMs
+            if (wall != null && audio != null) {
                 Text(
-                    "Took ${formatClock(session.transcribeWallMs!!)} for " +
-                        "${formatClock(session.transcribeAudioMs!!)} of audio " +
-                        "(${"%.1f".format(rtf)}× realtime)" +
+                    "Took ${formatClock(wall)} for ${formatClock(audio)} of audio " +
+                        "(${"%.1f".format(wall.toDouble() / audio.coerceAtLeast(1))}× realtime)" +
                         (session.transcribeModel?.let { " · $it" } ?: ""),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
-            // Why nothing happened, when nothing happened. A pass that fails
-            // silently is indistinguishable from one that is merely slow.
             when (val o = outcome) {
                 is TranscribeOutcome.NoModel -> Text(
                     "No speech model installed. Open Settings → Speech models and " +
@@ -628,87 +637,42 @@ private fun TranscriptCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
-                groups.isEmpty() -> Text(
+                editable.isEmpty() -> Text(
                     "Not transcribed yet. Download a model in Settings, then tap " +
                         "Transcribe. Your audio is safe either way.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
-                else -> groups.forEach { group ->
-                    // Split first by speaking turn, then by language. A turn
-                    // change means someone else started talking, which deserves
-                    // a visible break more than a language switch does.
-                    group.words.groupBy { it.turnIdx }.entries
-                        .sortedBy { it.key }
-                        .forEach { (turnIdx, turnWords) ->
-                            if (turnIdx > 0) {
-                                Text(
-                                    "— new voice —",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(top = 12.dp),
-                                )
-                            }
-                            LanguageRuns(
-                                words = turnWords,
-                                recordingId = group.recordingId,
-                                selection = selection,
-                                corrections = corrections[group.recordingId].orEmpty(),
-                                onWordTap = onWordTap,
-                                onWordLongPress = onWordLongPress,
-                            )
-                        }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Renders words as runs of a single language, each on its own line with its
- * own direction — mixing scripts inside one flowing row put Farsi and English
- * in the wrong visual order, because bidi reordering fights the layout
- * direction.
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun LanguageRuns(
-    words: List<TranscriptWordEntity>,
-    recordingId: String,
-    selection: Selection?,
-    corrections: List<CorrectionEntity>,
-    onWordTap: (recordingId: String, t0Ms: Long) -> Unit,
-    onWordLongPress: (recordingId: String, wordIdx: Int) -> Unit,
-) {
-    Column {
-        languageRuns(words).forEach { run ->
-            val rtl = run.lang == "fa"
-            CompositionLocalProvider(
-                LocalLayoutDirection provides
-                    if (rtl) LayoutDirection.Rtl else LayoutDirection.Ltr,
-            ) {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    run.words.forEach { word ->
-                        // A correction covers a span, so only its first word
-                        // renders the replacement; the rest are folded into it.
-                        val covering = corrections.firstOrNull {
-                            word.wordIdx in it.firstWordIdx..it.lastWordIdx
-                        }
-                        if (covering != null && word.wordIdx != covering.firstWordIdx) {
-                            return@forEach
-                        }
-                        WordChip(
-                            word = word,
-                            corrected = covering?.correctedText,
-                            selected = selection != null &&
-                                selection.recordingId == recordingId &&
-                                word.wordIdx in selection.first..selection.last,
-                            onTap = { onWordTap(recordingId, word.t0Ms) },
-                            onLongPress = { onWordLongPress(recordingId, word.wordIdx) },
+                else -> {
+                    Text(
+                        "Fix anything that's wrong. It saves as you type, and what you " +
+                            "change becomes training data.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 8.dp),
+                    )
+                    editable.values.sortedBy { it.idx }.forEach { item ->
+                        EditableSegment(
+                            item = item,
+                            dictation = dictation,
+                            dictated = dictated,
+                            onTextChanged = { onTextChanged(item.recordingId, it) },
+                            onRevert = { onRevert(item.recordingId) },
+                            onPlayFrom = { onPlayFrom(item.recordingId, it) },
+                            onStartDictation = onStartDictation,
+                            onStopDictation = onStopDictation,
+                            onDictationConsumed = onDictationConsumed,
+                            onInsertDictation = { current, at, text ->
+                                onInsertDictation(item.recordingId, current, at, text)
+                            },
+                        )
+                    }
+                    if (savedAt != null) {
+                        Text(
+                            "Saved",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -717,88 +681,81 @@ private fun LanguageRuns(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun WordChip(
-    word: TranscriptWordEntity,
-    corrected: String?,
-    selected: Boolean,
-    onTap: () -> Unit,
-    onLongPress: () -> Unit,
-) {
-    // Low-confidence words are muted rather than hidden — knowing whisper was
-    // unsure is more useful than a confident-looking wrong word.
-    val alpha = if (word.prob < LOW_CONFIDENCE) 0.45f else 1f
-    val deleted = corrected != null && corrected.isBlank()
-
-    Text(
-        text = when {
-            deleted -> word.text
-            corrected != null -> corrected
-            else -> word.text
-        },
-        style = MaterialTheme.typography.bodyLarge,
-        textDecoration = if (deleted) TextDecoration.LineThrough else null,
-        color = when {
-            deleted -> MaterialTheme.colorScheme.onSurfaceVariant
-            // A corrected word is yours, not the model's, and should read that
-            // way at a glance.
-            corrected != null -> MaterialTheme.colorScheme.primary
-            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
-        },
-        modifier = Modifier
-            .clip(MaterialTheme.shapes.small)
-            .background(
-                if (selected) {
-                    MaterialTheme.colorScheme.secondaryContainer
-                } else {
-                    androidx.compose.ui.graphics.Color.Transparent
-                },
-            )
-            .combinedClickable(onClick = onTap, onLongClick = onLongPress)
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-    )
-}
-
-/** A stretch of consecutive words sharing one language. */
-private data class LanguageRun(val lang: String, val words: List<TranscriptWordEntity>)
-
 /**
- * Splits a transcript into runs at each language change, so the UI can put a
- * line break between them and give each its own direction.
+ * One recording's transcript, editable in place.
  *
- * Script-neutral words ("und" — numbers, punctuation) continue the run they
- * are in rather than starting a new one; otherwise a single digit mid-sentence
- * would break the line in two.
+ * The field owns its text while focused rather than being driven from the
+ * database on each keystroke: a round trip through Room would fight the cursor,
+ * which is the standard way a text field becomes unusable.
  */
-private fun languageRuns(words: List<TranscriptWordEntity>): List<LanguageRun> {
-    val runs = mutableListOf<LanguageRun>()
-    var currentLang: String? = null
-    var current = mutableListOf<TranscriptWordEntity>()
+@Composable
+private fun EditableSegment(
+    item: EditableTranscript,
+    dictation: DictationState,
+    dictated: String?,
+    onTextChanged: (String) -> Unit,
+    onRevert: () -> Unit,
+    onPlayFrom: (Int) -> Unit,
+    onStartDictation: () -> Unit,
+    onStopDictation: () -> Unit,
+    onDictationConsumed: () -> Unit,
+    onInsertDictation: (current: String, at: Int, text: String) -> Unit,
+) {
+    var value by remember(item.recordingId) { mutableStateOf(TextFieldValue(item.text)) }
 
-    for (word in words) {
-        val lang = word.lang
-        if (lang == "und" || lang == currentLang || currentLang == null) {
-            if (currentLang == null && lang != "und") currentLang = lang
-            current += word
-        } else {
-            runs += LanguageRun(currentLang, current)
-            currentLang = lang
-            current = mutableListOf(word)
+    // Adopt outside changes — a re-transcription, a revert — but only real
+    // ones, so typing is never interrupted by an echo of itself.
+    LaunchedEffect(item.text) {
+        if (item.text != value.text) value = value.copy(text = item.text)
+    }
+
+    // Dictated text is inserted at the cursor rather than replacing the field:
+    // speaking a correction should behave like typing one.
+    LaunchedEffect(dictated) {
+        val spoken = dictated ?: return@LaunchedEffect
+        onInsertDictation(value.text, value.selection.start, spoken)
+        onDictationConsumed()
+    }
+
+    Column(Modifier.padding(bottom = 12.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = {
+                value = it
+                onTextChanged(it.text)
+            },
+            modifier = Modifier.fillMaxWidth(),
+            textStyle = MaterialTheme.typography.bodyLarge,
+            minLines = 3,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { onPlayFrom(value.selection.start) }) {
+                Text("Play from cursor")
+            }
+            when (dictation) {
+                is DictationState.Recording ->
+                    TextButton(onClick = onStopDictation) { Text("Stop") }
+                is DictationState.Transcribing ->
+                    Text(
+                        "Transcribing…",
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                    )
+                is DictationState.Failed -> Text(
+                    dictation.reason,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                is DictationState.Idle ->
+                    TextButton(onClick = onStartDictation) { Text("Dictate") }
+            }
+            if (item.edited) {
+                TextButton(onClick = onRevert) { Text("Revert") }
+            }
         }
     }
-    if (current.isNotEmpty()) runs += LanguageRun(currentLang ?: "und", current)
-    return runs
 }
 
-private const val LOW_CONFIDENCE = 0.55f
-
-/**
- * Marking a session reviewed is an assertion about its contents: that what you
- * did not correct is correct. That is what allows untouched words to be
- * exported as weak positives, so the copy has to say so rather than reading
- * like a bookmark.
- */
 @Composable
 private fun ReviewCard(reviewedAt: Long?, onToggle: () -> Unit) {
     Card(Modifier.fillMaxWidth()) {

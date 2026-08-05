@@ -2,6 +2,7 @@ package dev.bscribe.data.repo
 
 import dev.bscribe.core.asr.Lang
 import dev.bscribe.core.asr.ScriptLang
+import dev.bscribe.core.asr.TextDiff
 import dev.bscribe.core.asr.TranscriptPass
 import dev.bscribe.core.asr.Word
 import dev.bscribe.core.audio.WavRepair
@@ -13,6 +14,7 @@ import dev.bscribe.data.db.CorrectionEntity
 import dev.bscribe.data.db.LanguageFeedbackEntity
 import dev.bscribe.data.db.SessionEntity
 import dev.bscribe.data.db.SessionWithRecordings
+import dev.bscribe.data.db.TranscriptEditEntity
 import dev.bscribe.data.db.TranscriptWordEntity
 import java.io.File
 import java.util.UUID
@@ -35,6 +37,7 @@ class SessionRepository(
     private val transcripts get() = db.transcriptDao()
     private val feedback get() = db.feedbackDao()
     private val corrections get() = db.correctionDao()
+    private val edits get() = db.editDao()
 
     fun observeSessions(): Flow<List<SessionWithRecordings>> = sessions.observeAllWithRecordings()
 
@@ -174,6 +177,50 @@ class SessionRepository(
     suspend fun unmarkReviewed(sessionId: String) {
         val current = sessions.byId(sessionId) ?: return
         sessions.update(current.copy(reviewedAt = null, state = SessionState.TRANSCRIBED))
+    }
+
+    // ---- edited transcripts ----
+
+    fun observeEdit(recordingId: String): Flow<TranscriptEditEntity?> =
+        edits.observe(recordingId)
+
+    /** The model's own text for a recording, as a single string. */
+    suspend fun baselineTextOf(recordingId: String): String =
+        transcriptOf(recordingId).joinToString(" ") { it.text }
+
+    /**
+     * Saves an edit.
+     *
+     * The baseline is captured once, at the first edit, and never moved. If a
+     * later re-transcription were allowed to redefine it, an edit made against
+     * the old text would be diffed against text the user never saw — producing
+     * correction pairs that describe an edit nobody made.
+     */
+    suspend fun saveEdit(recordingId: String, editedText: String) {
+        val existing = edits.byRecording(recordingId)
+        val baseline = existing?.baselineText ?: baselineTextOf(recordingId)
+        if (existing == null && editedText == baseline) return // nothing to record
+        edits.upsert(
+            TranscriptEditEntity(
+                recordingId = recordingId,
+                baselineText = baseline,
+                editedText = editedText,
+                updatedAt = clock(),
+            ),
+        )
+    }
+
+    /** Throws the edit away and goes back to what the model produced. */
+    suspend fun revertEdit(recordingId: String) = edits.delete(recordingId)
+
+    /**
+     * The correction pairs an edit implies, located by word index against the
+     * baseline. This is the shape training needs; the text field is only how
+     * they get produced.
+     */
+    suspend fun changesFor(recordingId: String): List<TextDiff.Change> {
+        val edit = edits.byRecording(recordingId) ?: return emptyList()
+        return TextDiff.changes(TextDiff.tokenize(edit.baselineText), edit.editedText)
     }
 
     fun observeCorrections(recordingId: String): Flow<List<CorrectionEntity>> =

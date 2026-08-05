@@ -26,8 +26,9 @@ class Converters {
         CorrectionEntity::class,
         ExportRecordEntity::class,
         LanguageFeedbackEntity::class,
+        TranscriptEditEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -38,6 +39,7 @@ abstract class ScribeDatabase : RoomDatabase() {
     abstract fun correctionDao(): CorrectionDao
     abstract fun exportDao(): ExportDao
     abstract fun feedbackDao(): LanguageFeedbackDao
+    abstract fun editDao(): TranscriptEditDao
 
     companion object {
         /**
@@ -124,11 +126,26 @@ abstract class ScribeDatabase : RoomDatabase() {
             }
         }
 
+        /** v6 → v7: the user's edited transcript, kept whole. */
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS transcript_edits (" +
+                        "recordingId TEXT NOT NULL PRIMARY KEY, " +
+                        "baselineText TEXT NOT NULL, " +
+                        "editedText TEXT NOT NULL, " +
+                        "updatedAt INTEGER NOT NULL, " +
+                        "FOREIGN KEY(recordingId) REFERENCES recordings(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)",
+                )
+            }
+        }
+
         fun build(context: Context): ScribeDatabase =
             Room.databaseBuilder(context, ScribeDatabase::class.java, "scribe.db")
                 .addMigrations(
                     MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-                    MIGRATION_4_5, MIGRATION_5_6,
+                    MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                 )
                 .build()
     }

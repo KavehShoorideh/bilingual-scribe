@@ -186,6 +186,35 @@ data class CorrectionEntity(
     val updatedAt: Long,
 )
 
+/**
+ * The user's edited transcript for a recording.
+ *
+ * Stored whole rather than as a set of span edits, because editing the text
+ * directly is the interaction; the correction pairs training needs are
+ * recovered afterwards by diffing against [baselineText].
+ *
+ * [baselineText] is frozen at first edit so a later re-transcription cannot
+ * silently change what the edit was made against — which would turn a real
+ * correction into a meaningless pair.
+ */
+@Entity(
+    tableName = "transcript_edits",
+    foreignKeys = [
+        ForeignKey(
+            entity = RecordingEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["recordingId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class TranscriptEditEntity(
+    @PrimaryKey val recordingId: String,
+    val baselineText: String,
+    val editedText: String,
+    val updatedAt: Long,
+)
+
 /** Log of dataset exports (audit + incremental export later). */
 @Entity(tableName = "export_records")
 data class ExportRecordEntity(

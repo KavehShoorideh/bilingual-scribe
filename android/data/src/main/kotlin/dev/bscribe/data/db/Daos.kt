@@ -3,6 +3,7 @@ package dev.bscribe.data.db
 import androidx.room.Dao
 import androidx.room.Embedded
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Relation
 import androidx.room.Transaction
@@ -202,4 +203,19 @@ interface LanguageFeedbackDao {
             "AND t0Ms < :t1Ms AND t1Ms > :t0Ms",
     )
     suspend fun deleteOverlapping(recordingId: String, t0Ms: Long, t1Ms: Long)
+}
+
+@Dao
+interface TranscriptEditDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(edit: TranscriptEditEntity)
+
+    @Query("SELECT * FROM transcript_edits WHERE recordingId = :recordingId")
+    fun observe(recordingId: String): Flow<TranscriptEditEntity?>
+
+    @Query("SELECT * FROM transcript_edits WHERE recordingId = :recordingId")
+    suspend fun byRecording(recordingId: String): TranscriptEditEntity?
+
+    @Query("DELETE FROM transcript_edits WHERE recordingId = :recordingId")
+    suspend fun delete(recordingId: String)
 }
