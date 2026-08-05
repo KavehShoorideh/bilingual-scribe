@@ -99,9 +99,13 @@ class SessionRepository(
      * the transcript to that reading.
      */
     suspend fun chooseLanguage(recordingId: String, t0Ms: Long, t1Ms: Long, lang: String) {
-        // Apply the verdict as well as recording it. Without this a tap wrote
-        // a label and changed nothing on screen, so it read as doing nothing.
+        rewriteCanonical(recordingId, t0Ms, t1Ms, lang)
+        // Which lane reads as current in the comparison view.
         transcripts.chooseVariant(recordingId, t0Ms, t1Ms, lang)
+        // The words over this span have been replaced, so any correction
+        // pointing into it now refers to speech that is no longer there. A
+        // correction aimed at the wrong words is worse than none.
+        corrections.archiveOverlappingTime(recordingId, t0Ms, t1Ms)
         feedback.deleteOverlapping(recordingId, t0Ms, t1Ms)
         feedback.insert(
             LanguageFeedbackEntity(
@@ -113,6 +117,63 @@ class SessionRepository(
                 createdAt = clock(),
             ),
         )
+    }
+
+    /**
+     * Replaces the canonical transcript over a span with another language's
+     * reading of it, renumbering the whole recording.
+     *
+     * The canonical transcript is a single sequence with a single numbering.
+     * Flipping visibility between it and the per-language variants instead —
+     * which is what this used to do — interleaved two independent wordIdx
+     * sequences and scrambled the sentence on screen.
+     */
+    private suspend fun rewriteCanonical(
+        recordingId: String,
+        t0Ms: Long,
+        t1Ms: Long,
+        lang: String,
+    ) {
+        val rows = transcripts.allRowsOf(recordingId)
+        fun overlapsSpan(w: TranscriptWordEntity) = w.t0Ms < t1Ms && w.t1Ms > t0Ms
+
+        val replacement = rows.filter { it.variant == lang && overlapsSpan(it) }
+        // Nothing to swap in — leave the transcript alone rather than blanking
+        // the span, which would silently delete words.
+        if (replacement.isEmpty()) return
+
+        val outsideSpan = rows.filter { it.variant == CHOSEN_VARIANT && !overlapsSpan(it) }
+        val rebuilt = (outsideSpan + replacement)
+            .sortedBy { it.t0Ms }
+            .mapIndexed { idx, w ->
+                w.copy(
+                    id = 0, // autoGenerate; these are new rows
+                    wordIdx = idx,
+                    variant = CHOSEN_VARIANT,
+                    chosen = true,
+                )
+            }
+
+        transcripts.deleteCanonical(recordingId)
+        transcripts.insertAll(rebuilt)
+    }
+
+    /**
+     * Marks a session as reviewed.
+     *
+     * This is an assertion, not a bookmark: everything untouched in the
+     * session is taken as correct, which is what lets those words export as
+     * weak positives (`accepted` in docs/dataset-format.md). Reviewing a
+     * session you have not actually read would put wrong text into training
+     * data labelled as right.
+     */
+    suspend fun markReviewed(sessionId: String) {
+        sessions.markReviewed(sessionId, clock())
+    }
+
+    suspend fun unmarkReviewed(sessionId: String) {
+        val current = sessions.byId(sessionId) ?: return
+        sessions.update(current.copy(reviewedAt = null, state = SessionState.TRANSCRIBED))
     }
 
     fun observeCorrections(recordingId: String): Flow<List<CorrectionEntity>> =

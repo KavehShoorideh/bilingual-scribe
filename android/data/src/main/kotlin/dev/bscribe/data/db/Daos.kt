@@ -93,22 +93,43 @@ interface TranscriptDao {
     @Insert
     suspend fun insertAll(words: List<TranscriptWordEntity>)
 
-    @Query("SELECT * FROM transcript_words WHERE recordingId = :recordingId ORDER BY wordIdx")
-    suspend fun byRecording(recordingId: String): List<TranscriptWordEntity>
-
+    /** The canonical transcript: one reading, one numbering. */
     @Query(
         "SELECT * FROM transcript_words WHERE recordingId = :recordingId " +
-            "AND chosen = 1 ORDER BY wordIdx",
+            "AND variant = '' ORDER BY wordIdx",
+    )
+    suspend fun byRecording(recordingId: String): List<TranscriptWordEntity>
+
+    @Query("SELECT * FROM transcript_words WHERE recordingId = :recordingId")
+    suspend fun allRowsOf(recordingId: String): List<TranscriptWordEntity>
+
+    /**
+     * Canonical rows only. Selecting on `chosen` instead would interleave rows
+     * from the per-language variants, whose wordIdx is numbered separately —
+     * which scrambled the sentence after a language tap.
+     */
+    @Query(
+        "SELECT * FROM transcript_words WHERE recordingId = :recordingId " +
+            "AND variant = '' ORDER BY wordIdx",
     )
     fun observeByRecording(recordingId: String): Flow<List<TranscriptWordEntity>>
+
+    @Query("DELETE FROM transcript_words WHERE recordingId = :recordingId AND variant = ''")
+    suspend fun deleteCanonical(recordingId: String)
 
     /** Every reading, chosen or not — what the dual-lane timeline renders. */
     @Query("SELECT * FROM transcript_words WHERE recordingId = :recordingId ORDER BY t0Ms")
     fun observeAllVariants(recordingId: String): Flow<List<TranscriptWordEntity>>
 
+    /**
+     * Marks which language lane is the current reading over a span. Restricted
+     * to the variant rows: the canonical transcript is rewritten instead, not
+     * toggled, so that it keeps a single consistent numbering.
+     */
     @Query(
         "UPDATE transcript_words SET chosen = (variant = :variant) " +
-            "WHERE recordingId = :recordingId AND t0Ms < :t1Ms AND t1Ms > :t0Ms",
+            "WHERE recordingId = :recordingId AND variant != '' " +
+            "AND t0Ms < :t1Ms AND t1Ms > :t0Ms",
     )
     suspend fun chooseVariant(recordingId: String, t0Ms: Long, t1Ms: Long, variant: String)
 
@@ -132,6 +153,17 @@ interface CorrectionDao {
 
     @Query("UPDATE corrections SET archived = 1 WHERE recordingId = :recordingId")
     suspend fun archiveByRecording(recordingId: String)
+
+    /**
+     * Retires corrections over a stretch of audio, by time rather than by word
+     * index — used when the words themselves are replaced and renumbered, so
+     * the old indices no longer refer to the same speech.
+     */
+    @Query(
+        "UPDATE corrections SET archived = 1 WHERE recordingId = :recordingId " +
+            "AND archived = 0 AND t0Ms < :t1Ms AND t1Ms > :t0Ms",
+    )
+    suspend fun archiveOverlappingTime(recordingId: String, t0Ms: Long, t1Ms: Long)
 
     /** Retires earlier verdicts covering any of the same words. */
     @Query(

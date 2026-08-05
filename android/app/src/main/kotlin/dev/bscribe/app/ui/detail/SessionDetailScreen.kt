@@ -286,6 +286,14 @@ class SessionDetailViewModel(
         }
     }
 
+    fun toggleReviewed() {
+        viewModelScope.launch {
+            val current = session.value?.session ?: return@launch
+            if (current.reviewedAt == null) repo.markReviewed(sessionId)
+            else repo.unmarkReviewed(sessionId)
+        }
+    }
+
     fun retranscribe(context: Context) {
         context.appContainer.transcriptionRunner.clearOutcome()
         context.startForegroundService(
@@ -439,6 +447,15 @@ fun SessionDetailScreen(
                         TextButton(onClick = viewModel::clearSelection) { Text("Cancel") }
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            if (session != null && transcript.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                ReviewCard(
+                    reviewedAt = session.reviewedAt,
+                    onToggle = viewModel::toggleReviewed,
+                )
                 Spacer(Modifier.height(8.dp))
             }
 
@@ -775,3 +792,40 @@ private fun languageRuns(words: List<TranscriptWordEntity>): List<LanguageRun> {
 }
 
 private const val LOW_CONFIDENCE = 0.55f
+
+/**
+ * Marking a session reviewed is an assertion about its contents: that what you
+ * did not correct is correct. That is what allows untouched words to be
+ * exported as weak positives, so the copy has to say so rather than reading
+ * like a bookmark.
+ */
+@Composable
+private fun ReviewCard(reviewedAt: Long?, onToggle: () -> Unit) {
+    Card(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (reviewedAt == null) "Not reviewed" else "Reviewed",
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    if (reviewedAt == null) {
+                        "Marking this reviewed says the words you did not correct are " +
+                            "right, which lets them count as training examples."
+                    } else {
+                        "Marked ${formatTimestamp(reviewedAt)}. Untouched words count " +
+                            "as correct."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = onToggle) {
+                Text(if (reviewedAt == null) "Mark reviewed" else "Undo")
+            }
+        }
+    }
+}
