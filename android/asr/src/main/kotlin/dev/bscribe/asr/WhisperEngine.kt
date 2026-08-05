@@ -3,6 +3,7 @@ package dev.bscribe.asr
 import dev.bscribe.core.asr.BatchTranscriber
 import dev.bscribe.core.asr.DecodeParams
 import dev.bscribe.core.asr.DecodedSegment
+import dev.bscribe.core.asr.LanguagePrior
 import dev.bscribe.core.asr.ScriptLang
 import dev.bscribe.core.asr.SegmentMerge
 import dev.bscribe.core.asr.TranscriptPass
@@ -156,10 +157,16 @@ class WhisperEngine(
 
             val float = PcmConvert.toFloatMono(chunk)
             val startedAt = System.nanoTime()
+            // What language the audio *is*, asked before anything is decoded.
+            // Decode confidence cannot answer this: whisper is better at
+            // English than Persian, so a fluent English translation of Persian
+            // speech outscores a correct Persian transcription of it.
+            val prior = detectLanguages(float)
             val decoded = decodeWindow(float, params)
             val merged = SegmentMerge.merge(
                 decoded[slots[0].lang].orEmpty(),
                 decoded.getOrElse(slots.getOrNull(1)?.lang ?: "") { emptyList() },
+                prior,
             )
             val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
@@ -183,7 +190,8 @@ class WhisperEngine(
                 // winner reads as a translation pair rather than two readings
                 // of the same sound.
                 val rivals = decoded.filterKeys { it != lang }.values.flatten()
-                SegmentMerge.words(SegmentMerge.competitive(segments, rivals)).forEach { w ->
+                val kept = SegmentMerge.competitive(segments, rivals, prior = prior)
+                SegmentMerge.words(kept).forEach { w ->
                     perLanguage[lang]?.add(
                         w.copy(t0Ms = w.t0Ms + startMs, t1Ms = w.t1Ms + startMs),
                     )
@@ -212,6 +220,33 @@ class WhisperEngine(
      * sentence that switches language mid-way is a single window, so choosing
      * one language for the window threw away half the sentence.
      */
+    /**
+     * Asks the encoder which language this window is, for each language we
+     * decode in.
+     *
+     * Encoder-only, so it costs a fraction of a decode. Detection runs before
+     * the decodes because it shares a state with one of them and whisper_full
+     * overwrites the mel spectrogram it works from.
+     *
+     * A failure here is not fatal: an empty prior simply means the merge falls
+     * back to comparing decode confidence, which is where it started.
+     */
+    private suspend fun detectLanguages(float: FloatArray): LanguagePrior {
+        if (slots.size < 2) return LanguagePrior.NONE
+        val slot = slots[0]
+        val probs = slot.mutex.withLock {
+            WhisperNative.nativeDetectLanguage(ctx, slot.handle, float, 0, threadsPerDecode)
+        } ?: return LanguagePrior.NONE
+
+        val byLang = slots.mapNotNull { s ->
+            val id = WhisperNative.nativeLangId(s.lang)
+            if (id < 0 || id >= probs.size) null else s.lang to probs[id]
+        }.toMap()
+
+        Log.i(TAG, "language detector: $byLang")
+        return LanguagePrior(byLang)
+    }
+
     private suspend fun decodeWindow(
         float: FloatArray,
         params: DecodeParams,

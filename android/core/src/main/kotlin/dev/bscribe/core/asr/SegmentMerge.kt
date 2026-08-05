@@ -15,6 +15,35 @@ data class TranscriptPass(
     val alternatives: Map<String, List<Word>>,
 )
 
+/**
+ * How likely each language is to be what was actually spoken, from whisper's
+ * encoder-only language detector.
+ *
+ * This exists because mean log probability is not comparable across languages.
+ * Whisper is markedly better at English than Persian, so a correct English
+ * *translation* of Persian speech scores higher than a correct Persian
+ * *transcription* of it — and picking by confidence alone therefore replaces
+ * Persian with English wherever the model is fluent enough to translate.
+ *
+ * The detector answers a different question: not "how sure is this reading of
+ * itself" but "what language is this audio". That is the question that decides
+ * which reading is even eligible.
+ */
+data class LanguagePrior(val probabilities: Map<String, Float>) {
+
+    /** Log-probability of [lang], floored so an absent language is merely bad. */
+    fun logProbOf(lang: String): Float {
+        val p = probabilities[lang] ?: 0f
+        return kotlin.math.ln(p.coerceAtLeast(MIN_PROB).toDouble()).toFloat()
+    }
+
+    companion object {
+        /** No opinion — every language equally likely. */
+        val NONE = LanguagePrior(emptyMap())
+        private const val MIN_PROB = 1e-4f
+    }
+}
+
 /** One decoder segment — an utterance — from a single-language decode. */
 data class DecodedSegment(
     /** ISO 639-1 code the decode was forced to. */
@@ -46,25 +75,44 @@ object SegmentMerge {
      * they do, the more confident one wins and the other is dropped rather
      * than both being kept and the text duplicated.
      */
-    fun merge(a: List<DecodedSegment>, b: List<DecodedSegment>): List<DecodedSegment> {
+    fun merge(
+        a: List<DecodedSegment>,
+        b: List<DecodedSegment>,
+        prior: LanguagePrior = LanguagePrior.NONE,
+    ): List<DecodedSegment> {
+        fun score(s: DecodedSegment) = scoreOf(s, prior)
+
         val candidates = (a + b)
             .filter { it.words.isNotEmpty() }
-            // Earliest first; on a tie prefer the more confident, so the
-            // outcome does not depend on which language was decoded first.
-            .sortedWith(compareBy({ it.t0Ms }, { -it.avgLogProb }))
+            // Earliest first; on a tie prefer the better score, so the outcome
+            // does not depend on which language was decoded first.
+            .sortedWith(compareBy({ it.t0Ms }, { -score(it) }))
 
         val kept = mutableListOf<DecodedSegment>()
         for (segment in candidates) {
             val last = kept.lastOrNull()
             if (last == null || segment.t0Ms >= last.t1Ms - OVERLAP_TOLERANCE_MS) {
                 kept += segment
-            } else if (segment.avgLogProb > last.avgLogProb) {
+            } else if (score(segment) > score(last)) {
                 // Same stretch of audio, better reading of it.
                 kept[kept.lastIndex] = segment
             }
         }
         return kept
     }
+
+    /**
+     * Decode confidence adjusted by how likely the audio is to be that
+     * language at all.
+     *
+     * The prior is weighted rather than absolute: detection is itself
+     * fallible, and a code-switched window has one dominant language but two
+     * real ones. A strong prior should overturn a modest confidence gap — a
+     * fluent English translation of clearly-Persian speech — without silencing
+     * a genuinely English sentence inside a mostly-Persian note.
+     */
+    internal fun scoreOf(segment: DecodedSegment, prior: LanguagePrior): Float =
+        segment.avgLogProb + PRIOR_WEIGHT * prior.logProbOf(segment.lang)
 
     /**
      * Drops segments the other language decisively beat.
@@ -86,9 +134,11 @@ object SegmentMerge {
         own: List<DecodedSegment>,
         other: List<DecodedSegment>,
         marginLogProb: Float = DECISIVE_MARGIN,
+        prior: LanguagePrior = LanguagePrior.NONE,
     ): List<DecodedSegment> = own.filter { segment ->
         val beaten = other.any { rival ->
-            rival.overlaps(segment) && rival.avgLogProb - segment.avgLogProb > marginLogProb
+            rival.overlaps(segment) &&
+                scoreOf(rival, prior) - scoreOf(segment, prior) > marginLogProb
         }
         !beaten
     }
@@ -153,4 +203,14 @@ object SegmentMerge {
      * below -1.0.
      */
     const val DECISIVE_MARGIN = 0.45f
+
+    /**
+     * How much the language detector counts against decode confidence.
+     *
+     * At 0.6, a detector saying 90% Persian against 5% English shifts the
+     * comparison by about 1.7 nats — enough to overturn the systematic
+     * advantage English enjoys, and not enough to bury a clearly-better
+     * reading.
+     */
+    const val PRIOR_WEIGHT = 0.6f
 }

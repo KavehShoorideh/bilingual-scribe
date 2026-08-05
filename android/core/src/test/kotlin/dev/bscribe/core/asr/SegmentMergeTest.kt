@@ -206,4 +206,65 @@ class SegmentMergeTest {
         val english = listOf(seg("en", 0, 1000, -2.0f, "anything"))
         assertEquals(1, SegmentMerge.competitive(english, emptyList()).size)
     }
+
+    // ---- the language prior ----
+
+    private fun prior(vararg pairs: Pair<String, Float>) = LanguagePrior(pairs.toMap())
+
+    @Test
+    fun `a confident detector overturns english's built-in advantage`() {
+        // The observed failure: Persian speech came back as a fluent English
+        // *translation*, because whisper is better at English and so scored its
+        // translation above a correct Persian transcription.
+        val english = listOf(seg("en", 0, 3000, -0.30f, "let's", "see", "how", "it", "goes"))
+        val farsi = listOf(seg("fa", 0, 3000, -0.85f, "ببینیم", "چطور", "پیش", "میره"))
+
+        // Without a prior, confidence alone picks the translation.
+        assertEquals("en", SegmentMerge.merge(english, farsi).single().lang)
+
+        // The detector knows the audio is Persian.
+        val detected = prior("fa" to 0.93f, "en" to 0.04f)
+        assertEquals("fa", SegmentMerge.merge(english, farsi, detected).single().lang)
+    }
+
+    @Test
+    fun `a genuinely english sentence survives a mostly-persian note`() {
+        // The prior must not silence real code-switching: detection reports the
+        // window's dominant language, and a window can hold both.
+        val english = listOf(seg("en", 0, 3000, -0.12f, "the", "deadline", "is", "friday"))
+        val farsi = listOf(seg("fa", 0, 3000, -1.90f, "دد", "لاین"))
+        val detected = prior("fa" to 0.7f, "en" to 0.25f)
+        assertEquals("en", SegmentMerge.merge(english, farsi, detected).single().lang)
+    }
+
+    @Test
+    fun `no detector opinion leaves scoring on confidence alone`() {
+        val english = listOf(seg("en", 0, 2000, -0.20f, "hello"))
+        val farsi = listOf(seg("fa", 0, 2000, -0.90f, "سلام"))
+        assertEquals("en", SegmentMerge.merge(english, farsi, LanguagePrior.NONE).single().lang)
+    }
+
+    @Test
+    fun `an unseen language is merely unlikely, not impossible`() {
+        // A floor rather than zero, so a detector that has never heard of a
+        // language cannot make its reading infinitely bad.
+        val p = prior("fa" to 0.9f)
+        assertTrue(p.logProbOf("en") < p.logProbOf("fa"))
+        assertTrue(p.logProbOf("en").isFinite())
+    }
+
+    @Test
+    fun `the prior also decides which lane is shown`() {
+        // Suppression must use the same scoring, or the transcript and the
+        // comparison view would disagree about who won.
+        val english = listOf(seg("en", 0, 3000, -0.30f, "translated", "text", "here"))
+        val farsi = listOf(seg("fa", 0, 3000, -0.85f, "متن", "فارسی"))
+        val detected = prior("fa" to 0.95f, "en" to 0.02f)
+
+        assertTrue(
+            SegmentMerge.competitive(english, farsi, prior = detected).isEmpty(),
+            "a translation of clearly-Persian audio should not be offered",
+        )
+        assertEquals(1, SegmentMerge.competitive(farsi, english, prior = detected).size)
+    }
 }
